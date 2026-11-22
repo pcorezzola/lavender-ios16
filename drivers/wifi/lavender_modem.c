@@ -66,6 +66,8 @@ int lavender_modem_part_write(const char *name, uint32_t off, const void *src,
 int lavender_modem_rmtfs_buf(uint64_t *pa, uint32_t *size);
 int lavender_modem_rmtfs_copy(uint32_t off, void *buf, uint32_t len,
     boolean_t to_buf);
+int lavender_modem_assign(uint32_t pa, uint32_t size, const uint32_t *src,
+    int nsrc, const uint32_t *dst, const uint32_t *perm, int ndst);
 
 #define IO_CHUNK        (2u << 20)      /* windows into the 118 MiB image */
 
@@ -148,6 +150,8 @@ int lavender_modem_rmtfs_copy(uint32_t off, void *buf, uint32_t len,
 #define MEM_PROT_ASSIGN_ID      0x16u
 #define VMID_HLOS               0x3u
 #define VMID_MSS_MSA            0x0fu
+#define VMID_WLAN               0x18u
+#define VMID_WLAN_CE            0x19u
 #define PERM_READ               0x4u
 #define PERM_WRITE              0x2u
 #define PERM_EXEC               0x1u
@@ -452,7 +456,7 @@ scm_mem_assign(uint32_t pa, uint32_t size, const uint32_t *src_vmids,
 	uint32_t fn = SCM_FN(SCM_SVC_MP, MEM_PROT_ASSIGN_ID);
 	int err;
 
-	if (nsrc < 1 || nsrc > 2 || ndst < 1 || ndst > 2) {
+	if (nsrc < 1 || nsrc > 4 || ndst < 1 || ndst > 4) {
 		return EINVAL;
 	}
 	memset(buf, 0, SCM_BUF_SIZE);
@@ -486,6 +490,14 @@ scm_assign(uint32_t pa, uint32_t size, uint32_t src_vmid, uint32_t dst_vmid,
     uint32_t dst_perm)
 {
 	return scm_mem_assign(pa, size, &src_vmid, 1, &dst_vmid, &dst_perm, 1);
+}
+
+/* WLFW needs the MSA handed to MSS_MSA + WLAN + WLAN_CE in one call. */
+int
+lavender_modem_assign(uint32_t pa, uint32_t size, const uint32_t *src,
+    int nsrc, const uint32_t *dst, const uint32_t *perm, int ndst)
+{
+	return scm_mem_assign(pa, size, src, nsrc, dst, perm, ndst);
 }
 
 /* --- modem FAT16 ---------------------------------------------------------- */

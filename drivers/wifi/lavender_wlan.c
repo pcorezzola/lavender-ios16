@@ -64,6 +64,9 @@ extern int lavender_modem_part_write(const char *name, uint32_t off,
 extern int lavender_modem_rmtfs_buf(uint64_t *pa, uint32_t *size);
 extern int lavender_modem_rmtfs_copy(uint32_t off, void *buf, uint32_t len,
     boolean_t to_buf);
+extern int lavender_modem_assign(uint32_t pa, uint32_t size,
+    const uint32_t *src, int nsrc, const uint32_t *dst, const uint32_t *perm,
+    int ndst);
 
 #define GCC_PA          0x00100000u
 #define GCC_SIZE        0x94000u
@@ -1677,6 +1680,411 @@ wlan_rmtfs_rx(uint32_t node, uint32_t port, const uint8_t *d, uint32_t len)
 	}
 }
 
+/* --- F2 step 6: WLFW (QMI 0x45, host client) ---------------------------- */
+
+#define WLFW_SVC          0x45
+#define PORT_WLFW         0x4003
+#define WLFW_CLIENT_ID    0x4b4e454cu
+#define WLFW_MAX_DATA     6144u
+#define WLFW_MSA_PA       0x85700000u
+#define WLFW_MSA_SIZE     0x100000u
+#define WLFW_PERM_RW      (0x4u | 0x2u)
+
+#define WF_IND_REGISTER   0x20
+#define WF_FW_READY_IND   0x21
+#define WF_CAP            0x24
+#define WF_BDF_DOWNLOAD   0x25
+#define WF_CAL_REPORT     0x26
+#define WF_MSA_READY_IND  0x2b
+#define WF_MSA_INFO       0x2d
+#define WF_MSA_READY      0x2e
+
+enum {
+	WS_OFF, WS_IND, WS_MSA_INFO, WS_MSA_READY, WS_CAP,
+	WS_WAIT_MSA_IND, WS_BDF, WS_CAL, WS_WAIT_FW_READY, WS_READY, WS_FAILED
+};
+
+struct wlfw_reg {
+	uint64_t addr;
+	uint32_t size;
+	boolean_t secure;
+};
+
+static struct {
+	uint32_t node, port, txn, pending, state, board_id;
+	boolean_t fw_ready, msa_ind;
+	uint8_t buf[7 + WLFW_MAX_DATA + 256];
+	uint8_t bdf[0x40000];
+	uint32_t bdf_len, bdf_off, bdf_seg;
+	struct wlfw_reg reg[2];
+	unsigned nreg;
+} wf;
+
+static const char *
+wlfw_state(uint32_t st)
+{
+	static const char *names[] = {
+		"off", "ind", "msa-info", "msa-ready", "cap", "wait-msa-ind",
+		"bdf", "cal", "wait-fw-ready", "ready", "failed"
+	};
+
+	return st < sizeof(names) / sizeof(names[0]) ? names[st] : "?";
+}
+
+static void
+wlfw_tlv(uint8_t *b, uint32_t *n, uint8_t type, const void *v, uint16_t len)
+{
+	if (*n + 3 + len > 7 + WLFW_MAX_DATA + 256) {
+		return;
+	}
+	b[*n] = type;
+	memcpy(b + *n + 1, &len, 2);
+	memcpy(b + *n + 3, v, len);
+	*n += 3 + len;
+}
+
+static void
+wlfw_request(uint16_t msg, uint32_t n, uint32_t next)
+{
+	uint16_t body = (uint16_t)(n - 7);
+
+	wf.txn++;
+	if (wf.txn == 0) {
+		wf.txn = 1;
+	}
+	wf.buf[0] = QMI_REQ;
+	memcpy(wf.buf + 1, &wf.txn, 2);
+	memcpy(wf.buf + 3, &msg, 2);
+	memcpy(wf.buf + 5, &body, 2);
+	wf.pending = msg;
+	wf.state = next;
+	wlan_qrtr_send(QRTR_TYPE_DATA, PORT_WLFW, wf.node, wf.port, wf.buf, n);
+}
+
+static void
+wlfw_fail(const char *why)
+{
+	printf("SWEET WLAN: wlfw FAIL %s in %s\n", why, wlfw_state(wf.state));
+	wf.state = WS_FAILED;
+	wf.pending = 0;
+}
+
+static void
+wlfw_ind_register(void)
+{
+	uint8_t one = 1;
+	uint32_t n = 7, id = WLFW_CLIENT_ID;
+
+	wlfw_tlv(wf.buf, &n, 0x10, &one, 1);    /* fw_ready_enable */
+	wlfw_tlv(wf.buf, &n, 0x13, &one, 1);    /* msa_ready_enable */
+	wlfw_tlv(wf.buf, &n, 0x15, &id, 4);     /* client_id */
+	printf("SWEET WLAN: wlfw ind-register to %u:%x\n", wf.node, wf.port);
+	wlfw_request(WF_IND_REGISTER, n, WS_IND);
+}
+
+static boolean_t
+wlfw_bdf_load(void)
+{
+	char name[16];
+	uint32_t size = 0;
+
+	if (wf.board_id < 0xff) {
+		name[0] = 'B'; name[1] = 'D'; name[2] = 'W'; name[3] = 'L';
+		name[4] = 'A'; name[5] = 'N'; name[6] = '.'; name[7] = 'B';
+		name[8] = "0123456789ABCDEF"[(wf.board_id >> 4) & 0xf];
+		name[9] = "0123456789ABCDEF"[wf.board_id & 0xf];
+		name[10] = 0;
+	} else if (wf.board_id > 0xff && wf.board_id <= 0xfff) {
+		name[0] = 'B'; name[1] = 'D'; name[2] = 'W'; name[3] = 'L';
+		name[4] = 'A'; name[5] = 'N'; name[6] = '.';
+		name[7] = "0123456789ABCDEF"[(wf.board_id >> 8) & 0xf];
+		name[8] = "0123456789ABCDEF"[(wf.board_id >> 4) & 0xf];
+		name[9] = "0123456789ABCDEF"[wf.board_id & 0xf];
+		name[10] = 0;
+	} else {
+		const char *d = "BDWLAN.BIN";
+		unsigned i = 0;
+
+		while (d[i] != 0) {
+			name[i] = d[i];
+			i++;
+		}
+		name[i] = 0;
+	}
+	if (lavender_modem_fw_size(name, &size) != 0) {
+		const char *d = "BDWLAN.BIN";
+		unsigned i = 0;
+
+		printf("SWEET WLAN: wlfw %s missing, trying BDWLAN.BIN\n", name);
+		while (d[i] != 0) {
+			name[i] = d[i];
+			i++;
+		}
+		name[i] = 0;
+		if (lavender_modem_fw_size(name, &size) != 0) {
+			return FALSE;
+		}
+	}
+	if (size == 0 || size > sizeof(wf.bdf)) {
+		printf("SWEET WLAN: wlfw %s has %u bytes\n", name, size);
+		return FALSE;
+	}
+	if (lavender_modem_fw_read(name, 0, wf.bdf, size) != (int)size) {
+		return FALSE;
+	}
+	wf.bdf_len = size;
+	printf("SWEET WLAN: wlfw board id %x -> %s (%u bytes)\n",
+	    wf.board_id, name, size);
+	return TRUE;
+}
+
+static void
+wlfw_bdf_next(void)
+{
+	uint8_t one = 1, zero = 0;
+	uint32_t n = 7, zero32 = 0;
+	uint32_t left = wf.bdf_len - wf.bdf_off;
+	uint16_t len = (uint16_t)MIN(left, WLFW_MAX_DATA);
+	uint8_t end = left <= WLFW_MAX_DATA;
+	uint16_t tl = (uint16_t)(2 + len);
+
+	wlfw_tlv(wf.buf, &n, 0x01, &one, 1);
+	wlfw_tlv(wf.buf, &n, 0x10, &zero32, 4);         /* file_id */
+	wlfw_tlv(wf.buf, &n, 0x11, &wf.bdf_len, 4);
+	wlfw_tlv(wf.buf, &n, 0x12, &wf.bdf_seg, 4);
+	wf.buf[n] = 0x13;
+	memcpy(wf.buf + n + 1, &tl, 2);
+	memcpy(wf.buf + n + 3, &len, 2);
+	memcpy(wf.buf + n + 5, wf.bdf + wf.bdf_off, len);
+	n += 5u + len;
+	wlfw_tlv(wf.buf, &n, 0x14, &end, 1);
+	wlfw_request(WF_BDF_DOWNLOAD, n, WS_BDF);
+	(void)zero;
+}
+
+static void
+wlfw_bdf_start(void)
+{
+	if (!wlfw_bdf_load()) {
+		wlfw_fail("no board data");
+		return;
+	}
+	wf.bdf_off = 0;
+	wf.bdf_seg = 0;
+	printf("SWEET WLAN: wlfw sending board data (%u bytes)\n", wf.bdf_len);
+	wlfw_bdf_next();
+}
+
+static boolean_t
+wlfw_msa_assign(unsigned k, boolean_t to_wlan)
+{
+	uint32_t hlos = 0x3, rw = WLFW_PERM_RW;
+	uint32_t vm[3] = { 0x0f, 0x18, 0x19 };
+	uint32_t perm[3] = { rw, rw, rw };
+	unsigned cnt = wf.reg[k].secure ? 2 : 3;
+	int r;
+
+	if (to_wlan) {
+		r = lavender_modem_assign((uint32_t)wf.reg[k].addr,
+		    wf.reg[k].size, &hlos, 1, vm, perm, cnt);
+	} else {
+		r = lavender_modem_assign((uint32_t)wf.reg[k].addr,
+		    wf.reg[k].size, vm, cnt, &hlos, &rw, 1);
+	}
+	printf("SWEET WLAN: wlfw msa %llx+%x %s: ret %d\n",
+	    (unsigned long long)wf.reg[k].addr, wf.reg[k].size,
+	    to_wlan ? "to WLAN" : "back to HLOS", r);
+	return r == 0;
+}
+
+static void
+wlfw_rx(uint32_t node, uint32_t port, const uint8_t *d, uint32_t len)
+{
+	uint16_t txn, msg, mlen;
+	uint16_t l = 0, res = 1, err = 0;
+	const uint8_t *t, *v;
+
+	if (len < 7 || node != wf.node || port != wf.port ||
+	    wf.state == WS_OFF || wf.state == WS_FAILED) {
+		return;
+	}
+	memcpy(&txn, d + 1, 2);
+	memcpy(&msg, d + 3, 2);
+	memcpy(&mlen, d + 5, 2);
+	t = d + 7;
+	(void)mlen;
+
+	if (d[0] == 4) {                        /* indication */
+		if (msg == WF_MSA_READY_IND) {
+			wf.msa_ind = TRUE;
+			printf("SWEET WLAN: wlfw MSA ready indication\n");
+			if (wf.state == WS_WAIT_MSA_IND) {
+				wlfw_bdf_start();
+			}
+		} else if (msg == WF_FW_READY_IND) {
+			wf.fw_ready = TRUE;
+			printf("SWEET WLAN: *** wlfw FW READY ***\n");
+			if (wf.pending == 0) {
+				wf.state = WS_READY;
+			}
+		} else {
+			printf("SWEET WLAN: wlfw indication %x (%u bytes)\n",
+			    msg, len);
+		}
+		return;
+	}
+	if (msg != wf.pending || txn != wf.txn) {
+		printf("SWEET WLAN: wlfw unexpected %x txn %u (want %x/%u)\n",
+		    msg, txn, wf.pending, wf.txn);
+		return;
+	}
+	wf.pending = 0;
+	v = wlan_qm_find(d, len, 2, &l);
+	if (v != NULL && l >= 4) {
+		memcpy(&res, v, 2);
+		memcpy(&err, v + 2, 2);
+	}
+	switch (msg) {
+	case WF_IND_REGISTER: {
+		uint64_t st = 0;
+
+		v = wlan_qm_find(d, len, 0x10, &l);
+		if (v != NULL && l >= 8) {
+			memcpy(&st, v, 8);
+		}
+		printf("SWEET WLAN: wlfw ind-register result %u err %u "
+		    "fw_status %llx\n", res, err, (unsigned long long)st);
+		if (res != 0) {
+			wlfw_fail("ind-register rejected");
+		} else if (st & 2) {
+			wf.state = WS_READY;
+			wf.fw_ready = TRUE;
+			printf("SWEET WLAN: *** wlfw already up ***\n");
+		} else {
+			uint32_t n = 7, size = WLFW_MSA_SIZE;
+			uint64_t pa = WLFW_MSA_PA;
+
+			wlfw_tlv(wf.buf, &n, 0x01, &pa, 8);
+			wlfw_tlv(wf.buf, &n, 0x02, &size, 4);
+			wlfw_request(WF_MSA_INFO, n, WS_MSA_INFO);
+		}
+		break;
+	}
+	case WF_MSA_INFO: {
+		unsigned cnt;
+		unsigned k;
+
+		v = wlan_qm_find(d, len, 0x03, &l);
+		cnt = v != NULL && l >= 1 ? v[0] : 0;
+		if (res != 0 || v == NULL || cnt > 2 || l < 1 + 13 * cnt) {
+			wlfw_fail("msa-info rejected");
+			break;
+		}
+		wf.nreg = cnt;
+		for (k = 0; k < cnt; k++) {
+			memcpy(&wf.reg[k].addr, v + 1 + 13 * k, 8);
+			memcpy(&wf.reg[k].size, v + 9 + 13 * k, 4);
+			wf.reg[k].secure = v[13 + 13 * k] != 0;
+			printf("SWEET WLAN: wlfw msa %u: %llx+%x secure %u\n",
+			    k, (unsigned long long)wf.reg[k].addr,
+			    wf.reg[k].size, wf.reg[k].secure);
+			if (wf.reg[k].size == 0 ||
+			    wf.reg[k].size > WLFW_MSA_SIZE ||
+			    wf.reg[k].addr < WLFW_MSA_PA ||
+			    wf.reg[k].addr - WLFW_MSA_PA >
+			    WLFW_MSA_SIZE - wf.reg[k].size) {
+				wlfw_fail("msa region out of range");
+				return;
+			}
+		}
+		for (k = 0; k < cnt; k++) {
+			if (!wlfw_msa_assign(k, TRUE)) {
+				wlfw_fail("msa assign failed");
+				return;
+			}
+		}
+		wlfw_request(WF_MSA_READY, 7, WS_MSA_READY);
+		break;
+	}
+	case WF_MSA_READY:
+		printf("SWEET WLAN: wlfw msa-ready result %u err %u\n", res, err);
+		if (res != 0) {
+			wlfw_fail("msa-ready rejected");
+		} else {
+			wlfw_request(WF_CAP, 7, WS_CAP);
+		}
+		break;
+	case WF_CAP:
+		if (res != 0) {
+			wlfw_fail("cap rejected");
+			break;
+		}
+		wf.board_id = 0xff;
+		v = wlan_qm_find(d, len, 0x11, &l);
+		if (v != NULL && l >= 4) {
+			memcpy(&wf.board_id, v, 4);
+		}
+		printf("SWEET WLAN: wlfw cap board_id %x\n", wf.board_id);
+		wf.state = WS_WAIT_MSA_IND;
+		if (wf.msa_ind) {
+			wlfw_bdf_start();
+		}
+		break;
+	case WF_BDF_DOWNLOAD: {
+		uint32_t left = wf.bdf_len - wf.bdf_off;
+		uint32_t seg = MIN(left, WLFW_MAX_DATA);
+		boolean_t end = wf.bdf_off + seg >= wf.bdf_len;
+
+		if (res != 0 && !end) {
+			wlfw_fail("bdf segment rejected");
+			break;
+		}
+		wf.bdf_off += seg;
+		wf.bdf_seg++;
+		if (!end) {
+			wlfw_bdf_next();
+			break;
+		}
+		printf("SWEET WLAN: wlfw board data sent in %u segments\n",
+		    wf.bdf_seg);
+		{
+			uint8_t zero = 0;
+			uint32_t n = 7;
+
+			wlfw_tlv(wf.buf, &n, 0x01, &zero, 1);
+			wlfw_request(WF_CAL_REPORT, n, WS_CAL);
+		}
+		break;
+	}
+	case WF_CAL_REPORT:
+		printf("SWEET WLAN: wlfw cal-report result %u err %u\n", res,
+		    err);
+		if (res != 0) {
+			wlfw_fail("cal-report rejected");
+		} else {
+			wf.state = wf.fw_ready ? WS_READY : WS_WAIT_FW_READY;
+		}
+		break;
+	default:
+		printf("SWEET WLAN: wlfw response %x (%u bytes)\n", msg, len);
+		break;
+	}
+}
+
+static void
+wlfw_start(uint32_t node, uint32_t port)
+{
+	wf.node = node;
+	wf.port = port;
+	wf.txn = 0;
+	wf.pending = 0;
+	wf.msa_ind = FALSE;
+	wf.fw_ready = FALSE;
+	wf.state = WS_OFF;
+	printf("SWEET WLAN: *** WLFW service at %u:%x ***\n", node, port);
+	wlfw_ind_register();
+}
+
 /* --- F2 step 4: QMI servreg-locator (pd-mapper) ------------------------- */
 
 #define PORT_PDM  0x4001
@@ -1901,6 +2309,10 @@ wlan_svc_rx(uint32_t src_node, uint32_t src_port, uint32_t dst_port,
 		wlan_rmtfs_rx(src_node, src_port, d, len);
 		return TRUE;
 	}
+	if (dst_port == PORT_WLFW) {
+		wlfw_rx(src_node, src_port, d, len);
+		return TRUE;
+	}
 	if (dst_port == PORT_TFTP) {
 		wlan_tftp_req(src_node, src_port, d, len);
 		return TRUE;
@@ -1982,6 +2394,7 @@ wlan_qrtr_rx(const uint8_t *p, uint32_t len)
 			printf("SWEET WLAN: *** WLFW 0x45 up: node %u port "
 			    "%x ***\n", c->c, c->d);
 			q_wlfw_seen = TRUE;
+			wlfw_start(c->c, c->d);
 		}
 		break;
 	case QRTR_TYPE_DATA:
@@ -2461,7 +2874,7 @@ lavender_wlan_after_modem(void)
 		    sk_last, ready ? "READY" : "not ready");
 		if (ready) {
 			if (wlan_glink_start(part)) {
-				for (i2 = 0; i2 < 120000; i2++) {
+				for (i2 = 0; i2 < 240000; i2++) {
 					wlan_glink_poll(i2);
 					if (q_wlfw_seen) {
 						break;
