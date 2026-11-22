@@ -41,6 +41,7 @@ enum {
 	kLavBufNew      = 1,
 	kLavBufFree     = 2,
 	kLavSubmit      = 3,
+	kLavSubmitBuf   = 4,
 };
 
 #define LAV_BUFFERS     64
@@ -60,6 +61,9 @@ struct lav_buf_free {
 };
 struct lav_submit_out {
 	uint32_t fence, status;
+};
+struct lav_submit_buf {
+	uint32_t handle, offset, dwords, pad;
 };
 
 static IOLock * gLavLock;
@@ -122,6 +126,8 @@ class LavenderGPUUserClient : public IOUserClient
 	IOReturn bufferNew(struct lav_buf_new * request);
 	IOReturn bufferFree(uint32_t handle);
 	IOReturn submit(IOExternalMethodArguments * args, struct lav_submit_out * out);
+	IOReturn submitBuf(const struct lav_submit_buf * request, struct lav_submit_out * out);
+	IOReturn run(uint32_t * words, size_t size, struct lav_submit_out * out);
 
 public:
 	bool selfTest(void);
@@ -238,8 +244,6 @@ LavenderGPUUserClient::submit(IOExternalMethodArguments * args, struct lav_submi
 {
 	uint32_t * words;
 	size_t size;
-	IOReturn ret = kIOReturnSuccess;
-	int status = 0;
 
 	if (args->structureInputDescriptor != NULL) {
 		size = (size_t)args->structureInputDescriptor->getLength();
@@ -261,6 +265,15 @@ LavenderGPUUserClient::submit(IOExternalMethodArguments * args, struct lav_submi
 	} else {
 		memcpy(words, args->structureInput, size);
 	}
+	return run(words, size, out);
+}
+
+IOReturn
+LavenderGPUUserClient::run(uint32_t * words, size_t size, struct lav_submit_out * out)
+{
+	IOReturn ret = kIOReturnSuccess;
+	int status = 0;
+
 	IOLockLock(gLavLock);
 	out->fence = lavender_gpu_service_submit(words, (uint32_t)(size / 4), &status);
 	if (out->fence != 0) {
@@ -268,13 +281,45 @@ LavenderGPUUserClient::submit(IOExternalMethodArguments * args, struct lav_submi
 		gLavLast = out->fence;
 	}
 	IOLockUnlock(gLavLock);
-	IOLog("LavenderGPU: submit of %llu bytes: fence %u status %d, first words %08x %08x %08x %08x\n", (unsigned long long)size, out->fence, status, words[0], words[1], words[2], words[3]);
+	IOLog("LavenderGPU: submit of %llu bytes: fence %u status %d, first words %08x %08x %08x %08x\n", (unsigned long long)size, out->fence, status, size >= 4 ? words[0] : 0, size >= 8 ? words[1] : 0, size >= 12 ? words[2] : 0, size >= 16 ? words[3] : 0);
 	out->status = (uint32_t)status;
 	if (status != 0) {
 		ret = kIOReturnIOError;
 	}
 	IOFree(words, size);
 	return ret;
+}
+
+/* The stream is already in one of the client's buffers: copy it out of there, which avoids IOKit's large-input path. */
+IOReturn
+LavenderGPUUserClient::submitBuf(const struct lav_submit_buf * request, struct lav_submit_out * out)
+{
+	uint32_t * words;
+	size_t size = (size_t)request->dwords * 4;
+	IOReturn ret = kIOReturnBadArgument;
+
+	if (request->dwords == 0 || size > LAV_SUBMIT_MAX || (request->offset & 3) != 0) {
+		return kIOReturnBadArgument;
+	}
+	words = (uint32_t *)IOMalloc(size);
+	if (words == NULL) {
+		return kIOReturnNoMemory;
+	}
+	IOLockLock(gLavLock);
+	if (request->handle >= 1 && request->handle <= LAV_BUFFERS && fMemory[request->handle - 1] != NULL &&
+	    (uint64_t)request->offset + size <= fMemory[request->handle - 1]->getLength()) {
+		if (fMemory[request->handle - 1]->readBytes(request->offset, words, size) == size) {
+			ret = kIOReturnSuccess;
+		} else {
+			ret = kIOReturnVMError;
+		}
+	}
+	IOLockUnlock(gLavLock);
+	if (ret != kIOReturnSuccess) {
+		IOFree(words, size);
+		return ret;
+	}
+	return run(words, size, out);
 }
 
 IOReturn
@@ -320,6 +365,16 @@ LavenderGPUUserClient::externalMethod(uint32_t selector, IOExternalMethodArgumen
 			return kIOReturnNotReady;
 		}
 		ret = submit(args, &r.out);
+		outSize = sizeof(r.out);
+		break;
+	case kLavSubmitBuf:
+		if (args->structureInput == NULL || size < sizeof(struct lav_submit_buf)) {
+			return kIOReturnBadArgument;
+		}
+		if (!lavender_gpu_service_ready()) {
+			return kIOReturnNotReady;
+		}
+		ret = submitBuf((const struct lav_submit_buf *)args->structureInput, &r.out);
 		outSize = sizeof(r.out);
 		break;
 	default:
