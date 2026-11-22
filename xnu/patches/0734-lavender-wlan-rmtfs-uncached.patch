@@ -1,0 +1,72 @@
+diff --git a/bsd/dev/lavender_modem.c b/bsd/dev/lavender_modem.c
+index beee08b..f25a054 100644
+--- a/bsd/dev/lavender_modem.c
++++ b/bsd/dev/lavender_modem.c
+@@ -242,6 +242,28 @@ io_copy(vm_offset_t dst, const void *src, uint32_t n)
+ 	__asm__ volatile("dsb sy" ::: "memory");
+ }
+ 
++/* The reverse of io_copy: read from Device memory into a normal buffer. */
++static void
++io_read(void *dst, vm_offset_t src, uint32_t n)
++{
++	uint8_t *d = dst;
++	uint32_t i = 0;
++
++	while (i < n && ((src + i) & 7) != 0) {
++		d[i] = *(volatile uint8_t *)(src + i);
++		i++;
++	}
++	for (; i + 8 <= n; i += 8) {
++		uint64_t v = *(volatile uint64_t *)(src + i);
++
++		memcpy(d + i, &v, 8);
++	}
++	for (; i < n; i++) {
++		d[i] = *(volatile uint8_t *)(src + i);
++	}
++	__asm__ volatile("dsb sy" ::: "memory");
++}
++
+ /*
+  * 0709: io_submap is only 8 MiB (osfmk/arm/io_map.c IO_MAP_SIZE), so the
+  * 118 MiB image cannot be mapped in one go: 0708 wedged inside
+@@ -1057,8 +1079,19 @@ lavender_modem_rmtfs_buf(uint64_t *pa, uint32_t *size)
+ 			kmem_free(kernel_map, va, RMTFS_BUF_SIZE);
+ 			return EIO;
+ 		}
+-		g_rmtfs_va = va;
+ 		g_rmtfs_pa = pa32;
++		/*
++		 * Map the same PA as Device (no cache): the modem reads and
++		 * writes this buffer directly, and flush_dcache64() on these
++		 * pages faults inside FlushPoC_DcacheRegion (0733 panic).
++		 */
++		g_rmtfs_va = ml_io_map_unmappable(pa32, RMTFS_BUF_SIZE,
++		    VM_WIMG_IO);
++		printf("SWEET MODEM: rmtfs buf %08x map %s va %08x\n", pa32,
++		    g_rmtfs_va != 0 ? "ok" : "FAILED", (uint32_t)g_rmtfs_va);
++		if (g_rmtfs_va == 0) {
++			return ENOMEM;
++		}
+ 		g_rmtfs_ready = TRUE;
+ 		printf("SWEET MODEM: rmtfs buffer %08x+%x ready\n", pa32,
+ 		    RMTFS_BUF_SIZE);
+@@ -1079,15 +1112,10 @@ lavender_modem_rmtfs_copy(uint32_t off, void *buf, uint32_t len,
+ 		return EINVAL;
+ 	}
+ 	if (to_buf) {
+-		memcpy((uint8_t *)g_rmtfs_va + off, buf, len);
+-		/* The modem reads this buffer from DRAM, not through our cache. */
+-		flush_dcache64((addr64_t)(g_rmtfs_pa + off), len, TRUE);
++		io_copy(g_rmtfs_va + off, buf, len);
+ 	} else {
+-		/* Drop stale lines before reading what the modem wrote. */
+-		flush_dcache64((addr64_t)(g_rmtfs_pa + off), len, FALSE);
+-		memcpy(buf, (uint8_t *)g_rmtfs_va + off, len);
++		io_read(buf, g_rmtfs_va + off, len);
+ 	}
+-	__asm__ volatile("dsb sy" ::: "memory");
+ 	return (int)len;
+ }
+ 
