@@ -1093,13 +1093,17 @@ wlan_qrtr_send(uint32_t type, uint32_t src_port, uint32_t dst_node,
 /* --- F2 step 5: tftp host service (firmware files) ----------------------- */
 
 struct tftp_sess {
-	boolean_t used, last;
-	uint32_t node, port, rport, size, blk, sent;
+	boolean_t used, last, write, wr_src;
+	uint32_t node, port, rport, size, blk, sent, wlen;
 	char name[13];
+	char path[64];
 };
 
 static struct tftp_sess t_sess[TFTP_MAX_SESS];
 static uint8_t t_pkt[4 + TFTP_BLK];
+static uint8_t t_wr[64 * 1024];
+static uint32_t t_wr_len;
+static char t_wr_name[64];
 
 static void
 wlan_tftp_reply(struct tftp_sess *s, uint32_t n)
@@ -1130,7 +1134,10 @@ wlan_tftp_data(struct tftp_sess *s, uint32_t block)
 	uint32_t n = 0;
 	int r;
 
-	if (off < s->size) {
+	if (s->wr_src && off < s->size) {
+		n = MIN(s->blk, s->size - off);
+		memcpy(t_pkt + 4, t_wr + off, n);
+	} else if (!s->wr_src && off < s->size) {
 		r = lavender_modem_fw_read(s->name, off, t_pkt + 4, s->blk);
 		if (r < 0) {
 			printf("SWEET WLAN: tftp %s read %u failed %d\n", s->name,
@@ -1244,6 +1251,15 @@ wlan_tftp_req(uint32_t node, uint32_t port, const uint8_t *d, uint32_t len)
 	s->rport = port;
 	s->port = PORT_SESS_BASE + (uint32_t)(s - t_sess);
 	memcpy(s->name, name, sizeof(s->name));
+	{
+		unsigned k = 0;
+
+		while (path[k] != 0 && k + 1 < sizeof(s->path)) {
+			s->path[k] = path[k];
+			k++;
+		}
+		s->path[k] = 0;
+	}
 	s->blk = 512;
 	while (o + 1 < len) {
 		char key[24];
@@ -1270,21 +1286,67 @@ wlan_tftp_req(uint32_t node, uint32_t port, const uint8_t *d, uint32_t len)
 		}
 	}
 	if (op == TFTP_WRQ) {
-		printf("SWEET WLAN: tftp WRQ %s refused\n", name);
+		unsigned k = 0;
+
+		/*
+		 * The modem's server check writes /readwrite/server_check.txt
+		 * and expects it to stick; keep those writes in RAM and never
+		 * touch the phone's storage.
+		 */
+		if (strncmp(path, "/readwrite/", 11) != 0) {
+			printf("SWEET WLAN: tftp WRQ %s refused\n", name);
+			s->used = TRUE;
+			wlan_tftp_error(s, 2, "read only");
+			s->used = FALSE;
+			return;
+		}
+		t_wr_len = 0;
+		memset(t_wr, 0, sizeof(t_wr));
+		while (path[k] != 0 && k + 1 < sizeof(t_wr_name)) {
+			t_wr_name[k] = path[k];
+			k++;
+		}
+		t_wr_name[k] = 0;
+		s->write = TRUE;
 		s->used = TRUE;
-		wlan_tftp_error(s, 2, "read only");
-		s->used = FALSE;
+		printf("SWEET WLAN: tftp WRQ %s accepted\n", path);
+		if (opts) {
+			uint32_t n = 4;
+			const char *key = "blksize";
+
+			t_pkt[0] = 0;
+			t_pkt[1] = TFTP_OACK;
+			while (*key != 0) {
+				t_pkt[n++] = (uint8_t)*key++;
+			}
+			t_pkt[n++] = 0;
+			wlan_tftp_u32(t_pkt, &n, s->blk);
+			t_pkt[n++] = 0;
+			wlan_tftp_reply(s, n);
+		} else {
+			t_pkt[0] = 0;
+			t_pkt[1] = TFTP_ACK;
+			t_pkt[2] = 0;
+			t_pkt[3] = 0;
+			wlan_tftp_reply(s, 4);
+		}
 		return;
 	}
 	{
-		int r = lavender_modem_fw_size(name, &s->size);
+		if (strcmp(path, t_wr_name) == 0 && t_wr_len != 0) {
+			s->wr_src = TRUE;
+			s->size = t_wr_len;
+		} else {
+			int r = lavender_modem_fw_size(name, &s->size);
 
-		if (r != 0) {
-			printf("SWEET WLAN: tftp RRQ %s not found (%d)\n", name, r);
-			s->used = TRUE;
-			wlan_tftp_error(s, 1, "not found");
-			s->used = FALSE;
-			return;
+			if (r != 0) {
+				printf("SWEET WLAN: tftp RRQ %s not found (%d)\n",
+				    name, r);
+				s->used = TRUE;
+				wlan_tftp_error(s, 1, "not found");
+				s->used = FALSE;
+				return;
+			}
 		}
 	}
 	s->used = TRUE;
@@ -1345,6 +1407,30 @@ wlan_tftp_sess_rx(uint32_t port, const uint8_t *d, uint32_t len)
 				s->used = FALSE;
 			} else {
 				wlan_tftp_data(s, s->sent + 1);
+			}
+		}
+		break;
+	case TFTP_DATA:
+		if (!s->write) {
+			break;
+		}
+		{
+			uint32_t n = len - 4;
+
+			if (t_wr_len + n <= sizeof(t_wr)) {
+				memcpy(t_wr + t_wr_len, d + 4, n);
+				t_wr_len += n;
+			}
+			s->sent = block;
+			t_pkt[0] = 0;
+			t_pkt[1] = TFTP_ACK;
+			t_pkt[2] = (uint8_t)(block >> 8);
+			t_pkt[3] = (uint8_t)block;
+			wlan_tftp_reply(s, 4);
+			if (n < s->blk) {
+				printf("SWEET WLAN: tftp %s got %u bytes\n",
+				    s->path, t_wr_len);
+				s->used = FALSE;
 			}
 		}
 		break;
