@@ -1,0 +1,113 @@
+diff --git a/bsd/dev/lavender_wlan.c b/bsd/dev/lavender_wlan.c
+index 8211523..718919a 100644
+--- a/bsd/dev/lavender_wlan.c
++++ b/bsd/dev/lavender_wlan.c
+@@ -1094,7 +1094,9 @@ wlan_qrtr_send(uint32_t type, uint32_t src_port, uint32_t dst_node,
+ 
+ struct tftp_sess {
+ 	boolean_t used, last, write, wr_src;
++	boolean_t has_wsize, has_timeout, has_tsize;
+ 	uint32_t node, port, rport, size, blk, sent, wlen;
++	uint32_t wsize, timeout;
+ 	char name[13];
+ 	char path[64];
+ };
+@@ -1199,6 +1201,36 @@ wlan_tftp_u32(uint8_t *p, uint32_t *n, uint32_t v)
+ 	}
+ }
+ 
++/* Echo every option the modem asked for; clients abort on a partial OACK. */
++static void
++wlan_tftp_oack(struct tftp_sess *s)
++{
++	static const char *keys[4] = { "blksize", "wsize", "timeoutms",
++	    "tsize" };
++	boolean_t use[4] = { TRUE, s->has_wsize, s->has_timeout,
++	    s->has_tsize };
++	uint32_t n = 4;
++
++	t_pkt[0] = 0;
++	t_pkt[1] = TFTP_OACK;
++	for (int i = 0; i < 4; i++) {
++		const char *k = keys[i];
++		uint32_t v = i == 0 ? s->blk : i == 1 ? s->wsize :
++		    i == 2 ? s->timeout : (s->write ? 0 : s->size);
++
++		if (!use[i]) {
++			continue;
++		}
++		while (*k != 0) {
++			t_pkt[n++] = (uint8_t)*k++;
++		}
++		t_pkt[n++] = 0;
++		wlan_tftp_u32(t_pkt, &n, v);
++		t_pkt[n++] = 0;
++	}
++	wlan_tftp_reply(s, n);
++}
++
+ static void
+ wlan_tftp_req(uint32_t node, uint32_t port, const uint8_t *d, uint32_t len)
+ {
+@@ -1283,6 +1315,14 @@ wlan_tftp_req(uint32_t node, uint32_t port, const uint8_t *d, uint32_t len)
+ 		opts = TRUE;
+ 		if (strcasecmp(key, "blksize") == 0 && v >= 8 && v <= TFTP_BLK) {
+ 			s->blk = v;
++		} else if (strcasecmp(key, "wsize") == 0 && v >= 1 && v <= 64) {
++			s->wsize = v;
++			s->has_wsize = TRUE;
++		} else if (strcasecmp(key, "timeoutms") == 0 && v >= 1) {
++			s->timeout = v;
++			s->has_timeout = TRUE;
++		} else if (strcasecmp(key, "tsize") == 0) {
++			s->has_tsize = TRUE;
+ 		}
+ 	}
+ 	if (op == TFTP_WRQ) {
+@@ -1311,18 +1351,7 @@ wlan_tftp_req(uint32_t node, uint32_t port, const uint8_t *d, uint32_t len)
+ 		s->used = TRUE;
+ 		printf("SWEET WLAN: tftp WRQ %s accepted\n", path);
+ 		if (opts) {
+-			uint32_t n = 4;
+-			const char *key = "blksize";
+-
+-			t_pkt[0] = 0;
+-			t_pkt[1] = TFTP_OACK;
+-			while (*key != 0) {
+-				t_pkt[n++] = (uint8_t)*key++;
+-			}
+-			t_pkt[n++] = 0;
+-			wlan_tftp_u32(t_pkt, &n, s->blk);
+-			t_pkt[n++] = 0;
+-			wlan_tftp_reply(s, n);
++			wlan_tftp_oack(s);
+ 		} else {
+ 			t_pkt[0] = 0;
+ 			t_pkt[1] = TFTP_ACK;
+@@ -1353,25 +1382,7 @@ wlan_tftp_req(uint32_t node, uint32_t port, const uint8_t *d, uint32_t len)
+ 	printf("SWEET WLAN: tftp RRQ %s (%u bytes, blk %u%s) port %x\n",
+ 	    s->name, s->size, s->blk, opts ? ", oack" : "", s->port);
+ 	if (opts) {
+-		uint32_t n = 4;
+-		const char *k = "blksize";
+-
+-		t_pkt[0] = 0;
+-		t_pkt[1] = TFTP_OACK;
+-		while (*k != 0) {
+-			t_pkt[n++] = (uint8_t)*k++;
+-		}
+-		t_pkt[n++] = 0;
+-		wlan_tftp_u32(t_pkt, &n, s->blk);
+-		t_pkt[n++] = 0;
+-		k = "tsize";
+-		while (*k != 0) {
+-			t_pkt[n++] = (uint8_t)*k++;
+-		}
+-		t_pkt[n++] = 0;
+-		wlan_tftp_u32(t_pkt, &n, s->size);
+-		t_pkt[n++] = 0;
+-		wlan_tftp_reply(s, n);
++		wlan_tftp_oack(s);
+ 	} else {
+ 		wlan_tftp_data(s, 1);
+ 	}
