@@ -213,8 +213,7 @@ LavenderGPUUserClient::bufferNew(struct lav_buf_new * request)
 	request->address = fAddress[slot];
 	request->size = size;
 	IOLockUnlock(gLavLock);
-	IOLog("LavenderGPU: buffer %u: pa %llx size %llu
-", request->handle, request->address, size);
+	IOLog("LavenderGPU: buffer %u: pa %llx size %llu\n", request->handle, request->address, size);
 	return kIOReturnSuccess;
 }
 
@@ -269,8 +268,7 @@ LavenderGPUUserClient::submit(IOExternalMethodArguments * args, struct lav_submi
 		gLavLast = out->fence;
 	}
 	IOLockUnlock(gLavLock);
-	IOLog("LavenderGPU: submit of %llu bytes: fence %u status %d, first words %08x %08x %08x %08x
-", (unsigned long long)size, out->fence, status, words[0], words[1], words[2], words[3]);
+	IOLog("LavenderGPU: submit of %llu bytes: fence %u status %d, first words %08x %08x %08x %08x\n", (unsigned long long)size, out->fence, status, words[0], words[1], words[2], words[3]);
 	out->status = (uint32_t)status;
 	if (status != 0) {
 		ret = kIOReturnIOError;

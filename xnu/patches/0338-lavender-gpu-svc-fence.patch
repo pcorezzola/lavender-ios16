@@ -57,7 +57,7 @@ index 6cb8b8a..48739d9 100644
  	printf("LAVGPU: ladder finished\n");
  }
 diff --git a/iokit/Kernel/arm/LavenderGPU.cpp b/iokit/Kernel/arm/LavenderGPU.cpp
-index 61411ba..b9ee3ed 100644
+index 61411ba..12a6f9b 100644
 --- a/iokit/Kernel/arm/LavenderGPU.cpp
 +++ b/iokit/Kernel/arm/LavenderGPU.cpp
 @@ -33,6 +33,7 @@ extern "C" {
@@ -76,25 +76,23 @@ index 61411ba..b9ee3ed 100644
  	virtual bool initWithTask(task_t owningTask, void * securityID, UInt32 type, OSDictionary * properties) APPLE_KEXT_OVERRIDE;
  	virtual IOReturn clientClose(void) APPLE_KEXT_OVERRIDE;
  	virtual IOReturn clientMemoryForType(UInt32 type, IOOptionBits * options, IOMemoryDescriptor ** memory) APPLE_KEXT_OVERRIDE;
-@@ -211,6 +213,8 @@ LavenderGPUUserClient::bufferNew(struct lav_buf_new * request)
+@@ -211,6 +213,7 @@ LavenderGPUUserClient::bufferNew(struct lav_buf_new * request)
  	request->address = fAddress[slot];
  	request->size = size;
  	IOLockUnlock(gLavLock);
-+	IOLog("LavenderGPU: buffer %u: pa %llx size %llu
-+", request->handle, request->address, size);
++	IOLog("LavenderGPU: buffer %u: pa %llx size %llu\n", request->handle, request->address, size);
  	return kIOReturnSuccess;
  }
  
-@@ -265,6 +269,8 @@ LavenderGPUUserClient::submit(IOExternalMethodArguments * args, struct lav_submi
+@@ -265,6 +268,7 @@ LavenderGPUUserClient::submit(IOExternalMethodArguments * args, struct lav_submi
  		gLavLast = out->fence;
  	}
  	IOLockUnlock(gLavLock);
-+	IOLog("LavenderGPU: submit of %llu bytes: fence %u status %d, first words %08x %08x %08x %08x
-+", (unsigned long long)size, out->fence, status, words[0], words[1], words[2], words[3]);
++	IOLog("LavenderGPU: submit of %llu bytes: fence %u status %d, first words %08x %08x %08x %08x\n", (unsigned long long)size, out->fence, status, words[0], words[1], words[2], words[3]);
  	out->status = (uint32_t)status;
  	if (status != 0) {
  		ret = kIOReturnIOError;
-@@ -330,3 +336,101 @@ LavenderGPUUserClient::externalMethod(uint32_t selector, IOExternalMethodArgumen
+@@ -330,3 +334,101 @@ LavenderGPUUserClient::externalMethod(uint32_t selector, IOExternalMethodArgumen
  	}
  	return ret;
  }
