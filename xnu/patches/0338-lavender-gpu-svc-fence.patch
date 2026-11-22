@@ -56,360 +56,48 @@ index 6cb8b8a..48739d9 100644
  	}
  	printf("LAVGPU: ladder finished\n");
  }
-diff --git a/iokit/conf/files.arm64 b/iokit/conf/files.arm64
---- a/iokit/conf/files.arm64
-+++ b/iokit/conf/files.arm64
-@@ -12,6 +12,7 @@
- iokit/Kernel/arm/SweetCPU.cpp                                    optional iokitcpp
- iokit/Kernel/arm/TopazModem.cpp                                  optional iokitcpp
- iokit/Kernel/arm/SweetBusy.cpp                                   optional iokitcpp
-+iokit/Kernel/arm/LavenderGPU.cpp                                 optional iokitcpp
- iokit/Kernel/arm/SweetEntitlements.cpp                           optional iokitcpp
- iokit/Kernel/arm/SweetKeyStore.cpp                               optional iokitcpp
- iokit/Kernel/arm/SweetWatchdog.cpp                               optional iokitcpp
 diff --git a/iokit/Kernel/arm/LavenderGPU.cpp b/iokit/Kernel/arm/LavenderGPU.cpp
-new file mode 100644
---- /dev/null
+index 61411ba..b9ee3ed 100644
+--- a/iokit/Kernel/arm/LavenderGPU.cpp
 +++ b/iokit/Kernel/arm/LavenderGPU.cpp
-@@ -0,0 +1,436 @@
-+/*
-+ * LavenderGPU: the Adreno 512 for programs to use.
-+ *
-+ * lavender_gpu.c wakes the GPU and starts the command processor (the ladder up to step 12, boot-arg
-+ * lavgpu=30); when the ring is up it calls LavenderGPUStart() and this service appears. A program
-+ * opens it with IOServiceOpen() and speaks four requests (selectors of IOConnectCallStructMethod):
-+ *
-+ *   0 kLavInfo     -> struct lav_info: version, whether the GPU is ready, how many streams went in, last fence
-+ *   1 kLavBufNew   <- struct lav_buf_new {size}, -> {handle, address}: a buffer of physically contiguous memory,
-+ *                     zeroed, write-combined; address is what the GPU calls it (the GPU's translation of this
-+ *                     driver is the identity, so it is the physical address). The program maps it with
-+ *                     IOConnectMapMemory64(handle as the memory type).
-+ *   2 kLavBufFree  <- struct lav_buf_free {handle}
-+ *   3 kLavSubmit   <- an array of 32-bit PM4 words, -> struct lav_submit_out {fence, status}: the words go into the
-+ *                     ring followed by a cache flush and a fence write, and the call returns when the GPU has
-+ *                     reached the fence (it is synchronous: one stream at a time).
-+ *
-+ * Nothing here protects the system from a program that names addresses it does not own: this is the bring-up
-+ * interface (one trusted client, a root test tool or the Metal plug-in), not a security boundary.
-+ */
-+
-+#include <IOKit/IOLib.h>
-+#include <IOKit/IOLocks.h>
-+#include <IOKit/IOKitKeys.h>
-+#include <IOKit/IOPlatformExpert.h>
-+#include <IOKit/IOService.h>
-+#include <IOKit/IOUserClient.h>
-+#include <IOKit/IOBufferMemoryDescriptor.h>
-+#include <mach/vm_param.h>
-+#include <sys/systm.h>
-+
-+extern "C" {
-+int lavender_gpu_service_ready(void);
-+uint32_t lavender_gpu_service_submit(const uint32_t * dwords, uint32_t count, int * status);
-+void LavenderGPUStart(void);
+@@ -33,6 +33,7 @@ extern "C" {
+ int lavender_gpu_service_ready(void);
+ uint32_t lavender_gpu_service_submit(const uint32_t * dwords, uint32_t count, int * status);
+ void LavenderGPUStart(void);
 +void LavenderGPUSelfTest(void);
-+}
-+
-+enum {
-+	kLavInfo        = 0,
-+	kLavBufNew      = 1,
-+	kLavBufFree     = 2,
-+	kLavSubmit      = 3,
-+};
-+
-+#define LAV_BUFFERS     64
-+#define LAV_BUFFER_MAX  (16ull << 20)
-+#define LAV_SUBMIT_MAX  16384           /* bytes of PM4 words in one stream */
-+
-+struct lav_info {
-+	uint32_t version, ready, submits, last_fence;
-+};
-+struct lav_buf_new {
-+	uint64_t size;
-+	uint32_t handle, pad;
-+	uint64_t address;
-+};
-+struct lav_buf_free {
-+	uint32_t handle, pad;
-+};
-+struct lav_submit_out {
-+	uint32_t fence, status;
-+};
-+
-+static IOLock * gLavLock;
-+static uint32_t gLavSubmits, gLavLast;
-+
-+class LavenderGPU : public IOService
-+{
-+	OSDeclareDefaultStructors(LavenderGPU);
-+
-+public:
-+	virtual bool start(IOService * provider) APPLE_KEXT_OVERRIDE;
-+};
-+
-+OSDefineMetaClassAndStructors(LavenderGPU, IOService);
-+
-+bool
-+LavenderGPU::start(IOService * provider)
-+{
-+	if (!IOService::start(provider)) {
-+		return false;
-+	}
-+	setProperty(kIOUserClientClassKey, "LavenderGPUUserClient");
-+	setName("LavenderGPU");
-+	registerService();
-+	return true;
-+}
-+
-+void
-+LavenderGPUStart(void)
-+{
-+	IOService * provider = IOService::getPlatform();
-+	LavenderGPU * gpu;
-+
-+	if (gLavLock == NULL) {
-+		gLavLock = IOLockAlloc();
-+	}
-+	gpu = OSTypeAlloc(LavenderGPU);
-+	if (gpu == NULL || provider == NULL || !gpu->init() || !gpu->attach(provider)) {
-+		OSSafeReleaseNULL(gpu);
-+		IOLog("LavenderGPU: cannot create the service\n");
-+		return;
-+	}
-+	if (!gpu->start(provider)) {
-+		gpu->detach(provider);
-+		IOLog("LavenderGPU: the service did not start\n");
-+	} else {
-+		IOLog("LavenderGPU: service started\n");
-+	}
-+	gpu->release();
-+}
-+
-+class LavenderGPUUserClient : public IOUserClient
-+{
-+	OSDeclareDefaultStructors(LavenderGPUUserClient);
-+
-+	task_t                          fTask;
-+	IOBufferMemoryDescriptor *      fMemory[LAV_BUFFERS];   /* handle n is fMemory[n - 1] */
-+	uint64_t                        fAddress[LAV_BUFFERS];
-+
-+	IOReturn bufferNew(struct lav_buf_new * request);
-+	IOReturn bufferFree(uint32_t handle);
-+	IOReturn submit(IOExternalMethodArguments * args, struct lav_submit_out * out);
-+
-+public:
+ }
+ 
+ enum {
+@@ -123,6 +124,7 @@ class LavenderGPUUserClient : public IOUserClient
+ 	IOReturn submit(IOExternalMethodArguments * args, struct lav_submit_out * out);
+ 
+ public:
 +	bool selfTest(void);
-+	virtual bool initWithTask(task_t owningTask, void * securityID, UInt32 type, OSDictionary * properties) APPLE_KEXT_OVERRIDE;
-+	virtual IOReturn clientClose(void) APPLE_KEXT_OVERRIDE;
-+	virtual IOReturn clientMemoryForType(UInt32 type, IOOptionBits * options, IOMemoryDescriptor ** memory) APPLE_KEXT_OVERRIDE;
-+	virtual IOReturn externalMethod(uint32_t selector, IOExternalMethodArguments * args,
-+	    IOExternalMethodDispatch * dispatch, OSObject * target, void * reference) APPLE_KEXT_OVERRIDE;
-+};
-+
-+OSDefineMetaClassAndStructors(LavenderGPUUserClient, IOUserClient);
-+
-+bool
-+LavenderGPUUserClient::initWithTask(task_t owningTask, void * securityID, UInt32 type, OSDictionary * properties)
-+{
-+	if (!IOUserClient::initWithTask(owningTask, securityID, type, properties)) {
-+		return false;
-+	}
-+	fTask = owningTask;
-+	return true;
-+}
-+
-+IOReturn
-+LavenderGPUUserClient::clientClose(void)
-+{
-+	IOLockLock(gLavLock);
-+	for (uint32_t i = 0; i < LAV_BUFFERS; i++) {
-+		if (fMemory[i] != NULL) {
-+			fMemory[i]->release();
-+			fMemory[i] = NULL;
-+		}
-+	}
-+	IOLockUnlock(gLavLock);
-+	if (!isInactive()) {
-+		terminate();
-+	}
-+	return kIOReturnSuccess;
-+}
-+
-+IOReturn
-+LavenderGPUUserClient::clientMemoryForType(UInt32 type, IOOptionBits * options, IOMemoryDescriptor ** memory)
-+{
-+	IOReturn ret = kIOReturnBadArgument;
-+
-+	IOLockLock(gLavLock);
-+	if (type >= 1 && type <= LAV_BUFFERS && fMemory[type - 1] != NULL) {
-+		fMemory[type - 1]->retain();
-+		*memory = fMemory[type - 1];
-+		*options = 0;
-+		ret = kIOReturnSuccess;
-+	}
-+	IOLockUnlock(gLavLock);
-+	return ret;
-+}
-+
-+IOReturn
-+LavenderGPUUserClient::bufferNew(struct lav_buf_new * request)
-+{
-+	IOBufferMemoryDescriptor * memory;
-+	uint64_t size = round_page_64(request->size);
-+	uint32_t slot = LAV_BUFFERS;
-+
-+	if (request->size == 0 || size > LAV_BUFFER_MAX) {
-+		return kIOReturnBadArgument;
-+	}
-+	/* below 4 GB and in one piece: the GPU's page table is the identity of the first four gigabytes */
-+	memory = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,
-+	    kIODirectionInOut | kIOMemoryPhysicallyContiguous | kIOMapWriteCombineCache,
-+	    size, 0x00000000FFFFF000ULL);
-+	if (memory == NULL) {
-+		IOLog("LavenderGPU: no contiguous memory for a buffer of %llu bytes\n", size);
-+		return kIOReturnNoMemory;
-+	}
-+	IOLockLock(gLavLock);
-+	for (uint32_t i = 0; i < LAV_BUFFERS; i++) {
-+		if (fMemory[i] == NULL) {
-+			slot = i;
-+			break;
-+		}
-+	}
-+	if (slot == LAV_BUFFERS) {
-+		IOLockUnlock(gLavLock);
-+		memory->release();
-+		return kIOReturnNoResources;
-+	}
-+	fMemory[slot] = memory;
-+	fAddress[slot] = memory->getPhysicalSegment(0, NULL, kIOMemoryMapperNone);
-+	request->handle = slot + 1;
-+	request->address = fAddress[slot];
-+	request->size = size;
-+	IOLockUnlock(gLavLock);
+ 	virtual bool initWithTask(task_t owningTask, void * securityID, UInt32 type, OSDictionary * properties) APPLE_KEXT_OVERRIDE;
+ 	virtual IOReturn clientClose(void) APPLE_KEXT_OVERRIDE;
+ 	virtual IOReturn clientMemoryForType(UInt32 type, IOOptionBits * options, IOMemoryDescriptor ** memory) APPLE_KEXT_OVERRIDE;
+@@ -211,6 +213,8 @@ LavenderGPUUserClient::bufferNew(struct lav_buf_new * request)
+ 	request->address = fAddress[slot];
+ 	request->size = size;
+ 	IOLockUnlock(gLavLock);
 +	IOLog("LavenderGPU: buffer %u: pa %llx size %llu
 +", request->handle, request->address, size);
-+	return kIOReturnSuccess;
-+}
-+
-+IOReturn
-+LavenderGPUUserClient::bufferFree(uint32_t handle)
-+{
-+	IOReturn ret = kIOReturnBadArgument;
-+
-+	IOLockLock(gLavLock);
-+	if (handle >= 1 && handle <= LAV_BUFFERS && fMemory[handle - 1] != NULL) {
-+		fMemory[handle - 1]->release();
-+		fMemory[handle - 1] = NULL;
-+		ret = kIOReturnSuccess;
-+	}
-+	IOLockUnlock(gLavLock);
-+	return ret;
-+}
-+
-+/* The stream comes inline (up to 4 KB) or as a memory descriptor (larger); either way it is copied before use. */
-+IOReturn
-+LavenderGPUUserClient::submit(IOExternalMethodArguments * args, struct lav_submit_out * out)
-+{
-+	uint32_t * words;
-+	size_t size;
-+	IOReturn ret = kIOReturnSuccess;
-+	int status = 0;
-+
-+	if (args->structureInputDescriptor != NULL) {
-+		size = (size_t)args->structureInputDescriptor->getLength();
-+	} else {
-+		size = args->structureInputSize;
-+	}
-+	if (size == 0 || size > LAV_SUBMIT_MAX || (size & 3) != 0) {
-+		return kIOReturnBadArgument;
-+	}
-+	words = (uint32_t *)IOMalloc(size);
-+	if (words == NULL) {
-+		return kIOReturnNoMemory;
-+	}
-+	if (args->structureInputDescriptor != NULL) {
-+		if (args->structureInputDescriptor->readBytes(0, words, size) != size) {
-+			IOFree(words, size);
-+			return kIOReturnVMError;
-+		}
-+	} else {
-+		memcpy(words, args->structureInput, size);
-+	}
-+	IOLockLock(gLavLock);
-+	out->fence = lavender_gpu_service_submit(words, (uint32_t)(size / 4), &status);
-+	if (out->fence != 0) {
-+		gLavSubmits++;
-+		gLavLast = out->fence;
-+	}
-+	IOLockUnlock(gLavLock);
+ 	return kIOReturnSuccess;
+ }
+ 
+@@ -265,6 +269,8 @@ LavenderGPUUserClient::submit(IOExternalMethodArguments * args, struct lav_submi
+ 		gLavLast = out->fence;
+ 	}
+ 	IOLockUnlock(gLavLock);
 +	IOLog("LavenderGPU: submit of %llu bytes: fence %u status %d, first words %08x %08x %08x %08x
 +", (unsigned long long)size, out->fence, status, words[0], words[1], words[2], words[3]);
-+	out->status = (uint32_t)status;
-+	if (status != 0) {
-+		ret = kIOReturnIOError;
-+	}
-+	IOFree(words, size);
-+	return ret;
-+}
-+
-+IOReturn
-+LavenderGPUUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments * args,
-+    IOExternalMethodDispatch * dispatch, OSObject * target, void * reference)
-+{
-+	union {
-+		struct lav_info info;
-+		struct lav_buf_new bufNew;
-+		struct lav_buf_free bufFree;
-+		struct lav_submit_out out;
-+	} r;
-+	size_t size = args->structureInputSize;
-+	IOReturn ret = kIOReturnSuccess;
-+	size_t outSize = 0;
-+
-+	bzero(&r, sizeof(r));
-+	switch (selector) {
-+	case kLavInfo:
-+		r.info.version = 1;
-+		r.info.ready = lavender_gpu_service_ready() ? 1 : 0;
-+		r.info.submits = gLavSubmits;
-+		r.info.last_fence = gLavLast;
-+		outSize = sizeof(r.info);
-+		break;
-+	case kLavBufNew:
-+		if (args->structureInput == NULL || size < sizeof(uint64_t)) {
-+			return kIOReturnBadArgument;
-+		}
-+		memcpy(&r.bufNew, args->structureInput, size < sizeof(r.bufNew) ? size : sizeof(r.bufNew));
-+		ret = bufferNew(&r.bufNew);
-+		outSize = sizeof(r.bufNew);
-+		break;
-+	case kLavBufFree:
-+		if (args->structureInput == NULL || size < sizeof(uint32_t)) {
-+			return kIOReturnBadArgument;
-+		}
-+		memcpy(&r.bufFree, args->structureInput, size < sizeof(r.bufFree) ? size : sizeof(r.bufFree));
-+		ret = bufferFree(r.bufFree.handle);
-+		break;
-+	case kLavSubmit:
-+		if (!lavender_gpu_service_ready()) {
-+			return kIOReturnNotReady;
-+		}
-+		ret = submit(args, &r.out);
-+		outSize = sizeof(r.out);
-+		break;
-+	default:
-+		IOLog("LavenderGPU: request %u is not known here\n", selector);
-+		return kIOReturnUnsupported;
-+	}
-+	if (args->structureOutput != NULL && outSize != 0) {
-+		if (args->structureOutputSize > outSize) {
-+			args->structureOutputSize = (uint32_t)outSize;
-+		}
-+		memcpy(args->structureOutput, &r, args->structureOutputSize);
-+	}
-+	return ret;
-+}
+ 	out->status = (uint32_t)status;
+ 	if (status != 0) {
+ 		ret = kIOReturnIOError;
+@@ -330,3 +336,101 @@ LavenderGPUUserClient::externalMethod(uint32_t selector, IOExternalMethodArgumen
+ 	}
+ 	return ret;
+ }
 +
 +/* PM4 type 7 header: odd parity of the count and of the opcode, as the CP wants it. */
 +static uint32_t
