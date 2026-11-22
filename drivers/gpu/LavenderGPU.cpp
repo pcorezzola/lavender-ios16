@@ -33,6 +33,7 @@ extern "C" {
 int lavender_gpu_service_ready(void);
 uint32_t lavender_gpu_service_submit(const uint32_t * dwords, uint32_t count, int * status);
 void LavenderGPUStart(void);
+void LavenderGPUSelfTest(void);
 }
 
 enum {
@@ -123,6 +124,7 @@ class LavenderGPUUserClient : public IOUserClient
 	IOReturn submit(IOExternalMethodArguments * args, struct lav_submit_out * out);
 
 public:
+	bool selfTest(void);
 	virtual bool initWithTask(task_t owningTask, void * securityID, UInt32 type, OSDictionary * properties) APPLE_KEXT_OVERRIDE;
 	virtual IOReturn clientClose(void) APPLE_KEXT_OVERRIDE;
 	virtual IOReturn clientMemoryForType(UInt32 type, IOOptionBits * options, IOMemoryDescriptor ** memory) APPLE_KEXT_OVERRIDE;
@@ -211,6 +213,8 @@ LavenderGPUUserClient::bufferNew(struct lav_buf_new * request)
 	request->address = fAddress[slot];
 	request->size = size;
 	IOLockUnlock(gLavLock);
+	IOLog("LavenderGPU: buffer %u: pa %llx size %llu
+", request->handle, request->address, size);
 	return kIOReturnSuccess;
 }
 
@@ -265,6 +269,8 @@ LavenderGPUUserClient::submit(IOExternalMethodArguments * args, struct lav_submi
 		gLavLast = out->fence;
 	}
 	IOLockUnlock(gLavLock);
+	IOLog("LavenderGPU: submit of %llu bytes: fence %u status %d, first words %08x %08x %08x %08x
+", (unsigned long long)size, out->fence, status, words[0], words[1], words[2], words[3]);
 	out->status = (uint32_t)status;
 	if (status != 0) {
 		ret = kIOReturnIOError;
@@ -329,4 +335,102 @@ LavenderGPUUserClient::externalMethod(uint32_t selector, IOExternalMethodArgumen
 		memcpy(args->structureOutput, &r, args->structureOutputSize);
 	}
 	return ret;
+}
+
+/* PM4 type 7 header: odd parity of the count and of the opcode, as the CP wants it. */
+static uint32_t
+lav_parity(uint32_t v)
+{
+	v ^= v >> 16;
+	v ^= v >> 8;
+	v ^= v >> 4;
+	return (0x9669u >> (v & 0xf)) & 1u;
+}
+
+static uint32_t
+lav_pkt7(uint32_t opcode, uint32_t count)
+{
+	return 0x70000000u | (count & 0x3fff) | (lav_parity(count) << 15) | ((opcode & 0x7f) << 16) | (lav_parity(opcode) << 23);
+}
+
+/*
+ * What a program would do, from inside the kernel: open (initWithTask), ask for the state, make a buffer, have the
+ * GPU write two words into it with CP_MEM_WRITE through a submitted stream, read them back, give the buffer back.
+ */
+bool
+LavenderGPUUserClient::selfTest(void)
+{
+	IOExternalMethodArguments args;
+	struct lav_info info;
+	struct lav_buf_new bn;
+	struct lav_buf_free bf;
+	struct lav_submit_out out;
+	uint32_t stream[8];
+	volatile uint32_t * words;
+	IOReturn ret;
+	bool ok = false;
+
+	bzero(&args, sizeof(args));
+	bzero(&info, sizeof(info));
+	args.structureOutput = &info;
+	args.structureOutputSize = sizeof(info);
+	ret = externalMethod(kLavInfo, &args, NULL, NULL, NULL);
+	IOLog("LavenderGPU: selftest info: ret %x version %u ready %u submits %u last %u\n", ret, info.version, info.ready, info.submits, info.last_fence);
+
+	bzero(&bn, sizeof(bn));
+	bn.size = 4096;
+	bzero(&args, sizeof(args));
+	args.structureInput = &bn;
+	args.structureInputSize = sizeof(bn);
+	args.structureOutput = &bn;
+	args.structureOutputSize = sizeof(bn);
+	ret = externalMethod(kLavBufNew, &args, NULL, NULL, NULL);
+	IOLog("LavenderGPU: selftest buffer: ret %x handle %u address %llx size %llu\n", ret, bn.handle, bn.address, bn.size);
+	if (ret != kIOReturnSuccess || bn.handle == 0) {
+		return false;
+	}
+	words = (volatile uint32_t *)fMemory[bn.handle - 1]->getBytesNoCopy();
+
+	stream[0] = lav_pkt7(61, 3);                    /* CP_MEM_WRITE: address, then the words */
+	stream[1] = (uint32_t)bn.address;
+	stream[2] = (uint32_t)(bn.address >> 32);
+	stream[3] = 0x5eed1234u;
+	stream[4] = lav_pkt7(61, 3);
+	stream[5] = (uint32_t)(bn.address + 4);
+	stream[6] = (uint32_t)((bn.address + 4) >> 32);
+	stream[7] = 0x600dcafeu;
+	bzero(&args, sizeof(args));
+	bzero(&out, sizeof(out));
+	args.structureInput = stream;
+	args.structureInputSize = sizeof(stream);
+	args.structureOutput = &out;
+	args.structureOutputSize = sizeof(out);
+	ret = externalMethod(kLavSubmit, &args, NULL, NULL, NULL);
+	IOLog("LavenderGPU: selftest submit: ret %x fence %u status %u, buffer words %08x %08x (want 5eed1234 600dcafe)\n",
+	    ret, out.fence, out.status, words[0], words[1]);
+	ok = ret == kIOReturnSuccess && words[0] == 0x5eed1234u && words[1] == 0x600dcafeu;
+
+	bzero(&bf, sizeof(bf));
+	bf.handle = bn.handle;
+	bzero(&args, sizeof(args));
+	args.structureInput = &bf;
+	args.structureInputSize = sizeof(bf);
+	ret = externalMethod(kLavBufFree, &args, NULL, NULL, NULL);
+	IOLog("LavenderGPU: selftest free: ret %x; %s\n", ret, ok ? "PASSED" : "FAILED");
+	return ok;
+}
+
+void
+LavenderGPUSelfTest(void)
+{
+	LavenderGPUUserClient * client = OSTypeAlloc(LavenderGPUUserClient);
+
+	if (client == NULL || !client->init() || !client->initWithTask(kernel_task, NULL, 0, NULL)) {
+		IOLog("LavenderGPU: selftest: no client\n");
+		OSSafeReleaseNULL(client);
+		return;
+	}
+	client->selfTest();
+	client->clientClose();
+	client->release();
 }

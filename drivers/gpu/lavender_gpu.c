@@ -2617,6 +2617,7 @@ lav_show_on_screen(void)
  * stream goes into the ring, followed by a cache flush and a fence word, and it returns when the GPU wrote the fence.
  */
 extern void LavenderGPUStart(void);
+extern void LavenderGPUSelfTest(void);
 
 static int lav_svc_ready;
 static uint32_t lav_svc_seq;
@@ -2650,12 +2651,13 @@ lavender_gpu_service_submit(const uint32_t *dw, uint32_t count, int *status)
 	ring_put(0);
 	ring_put(0x12);
 	ring_pkt7(CP_WAIT_FOR_IDLE, 0);
-	ring_pkt7(CP_EVENT_WRITE, 4);
-	ring_put(0x4u | (1u << 30));			/* CACHE_FLUSH_TS */
+	ring_pkt7(CP_MEM_WRITE, 3);			/* the fence: a plain CP write, like the user's own */
 	ring_put((uint32_t)(rptr_pa + 0xe00));
 	ring_put((uint32_t)((rptr_pa + 0xe00) >> 32));
 	ring_put(seq);
 	ring_pkt7(CP_WAIT_FOR_IDLE, 0);
+	*f = 0;
+	flush_dcache64((addr64_t)(rptr_pa + 0xe00), 64, TRUE);
 	if (ring_submit("service stream") != 0) {
 		*status = EIO;
 		return 0;
@@ -2673,7 +2675,7 @@ lavender_gpu_service_submit(const uint32_t *dw, uint32_t count, int *status)
 }
 
 static void
-lav_service_start(void)
+lav_service_start(int selftest)
 {
 	if (ring_va == 0 || ring_pa == 0 || fence_pa == 0 || !gx_on) {
 		printf("LAVGPU: service: the CP is not running, not starting\n");
@@ -2684,6 +2686,9 @@ lav_service_start(void)
 	lav_svc_ready = 1;
 	LavenderGPUStart();
 	printf("LAVGPU: service: started\n");
+	if (selftest) {
+		LavenderGPUSelfTest();
+	}
 	/* the live log can start late: repeat the state for a while */
 	for (int i = 0; i < 90; i++) {
 		lav_wait(10000);
@@ -2802,8 +2807,8 @@ lavender_gpu_thread(__unused void *arg, __unused wait_result_t wr_)
 			step13_compute(1);
 		}
 	}
-	if (step == 30) {
-		lav_service_start();
+	if (step >= 30) {
+		lav_service_start(step == 31);
 	}
 	printf("LAVGPU: ladder finished\n");
 }
