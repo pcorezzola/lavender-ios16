@@ -1069,10 +1069,10 @@ lavender_modem_rmtfs_copy(uint32_t off, void *buf, uint32_t len,
 	if (to_buf) {
 		memcpy((uint8_t *)g_rmtfs_va + off, buf, len);
 		/* The modem reads this buffer from DRAM, not through our cache. */
-		flush_dcache64((addr64_t)(g_rmtfs_va + off), len, TRUE);
+		flush_dcache64((addr64_t)(g_rmtfs_pa + off), len, TRUE);
 	} else {
 		/* Drop stale lines before reading what the modem wrote. */
-		flush_dcache64((addr64_t)(g_rmtfs_va + off), len, FALSE);
+		flush_dcache64((addr64_t)(g_rmtfs_pa + off), len, FALSE);
 		memcpy(buf, (uint8_t *)g_rmtfs_va + off, len);
 	}
 	__asm__ volatile("dsb sy" ::: "memory");
