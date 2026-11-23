@@ -1162,24 +1162,11 @@ wlan_tftp_data(struct tftp_sess *s, uint32_t block)
 	wlan_tftp_reply(s, 4 + n);
 }
 
-/* Send up to wsize DATA blocks without waiting for each ACK. */
+/* Send one DATA block per ACK: the OACK advertises wsize 1 (see above). */
 static void
 wlan_tftp_window(struct tftp_sess *s, uint32_t from)
 {
-	uint32_t n = s->has_wsize ? s->wsize : 1;
-
-	if (n < 1) {
-		n = 1;
-	}
-	if (n > 16) {
-		n = 16;
-	}
-	for (uint32_t k = 0; k < n; k++) {
-		wlan_tftp_data(s, from + k);
-		if (s->last) {
-			break;
-		}
-	}
+	wlan_tftp_data(s, from);
 }
 
 /* /readonly/firmware/image/wlanmdsp.mbn -> WLANMDSP.MBN (8.3, uppercase). */
@@ -1257,7 +1244,12 @@ wlan_tftp_oack(struct tftp_sess *s)
 		t_pkt[n++] = 0;
 	}
 	wlan_tftp_key(t_pkt, &n, "wsize");
-	wlan_tftp_u32(t_pkt, &n, s->has_wsize ? s->wsize : 1);
+	/*
+	 * Advertise 1 even if the client asked for 10: ten 7680-byte blocks do
+	 * not fit the 16 KiB TX FIFO nor the modem's intents, and the window
+	 * deadlocks inside wlan_tx_write. RFC 2347 lets the server lower it.
+	 */
+	wlan_tftp_u32(t_pkt, &n, 1);
 	t_pkt[n++] = 0;
 	if (s->has_rsize && s->rsize != 0) {
 		wlan_tftp_key(t_pkt, &n, "rsize");
