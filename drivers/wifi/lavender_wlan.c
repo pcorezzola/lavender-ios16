@@ -843,6 +843,7 @@ static uint8_t q_pending[4 + TFTP_BLK + 80];
 static uint32_t q_pending_len;
 static unsigned g_ms, g_tx_msgs, g_rx_msgs;
 static uint32_t g_last_desc[4];
+static uint32_t g_last_intent_size, g_last_miss_len;
 
 static void
 wlan_mb(void)
@@ -1026,7 +1027,23 @@ wlan_glink_send(const void *data, uint32_t len)
 		}
 	}
 	if (i == g_ri_count) {
-		if (len <= sizeof(q_pending)) {
+		uint32_t maxs = 0, all = 0;
+
+		for (i = 0; i < g_ri_count; i++) {
+			if (g_ri[i].size > all) {
+				all = g_ri[i].size;
+			}
+			if (g_ri[i].size > maxs && !g_ri[i].used) {
+				maxs = g_ri[i].size;
+			}
+		}
+		if (len != g_last_miss_len) {
+			g_last_miss_len = len;
+			printf("SWEET WLAN: glink no intent for %u (free max "
+			    "%x, all max %x, n %u, q %u)\n", len, maxs, all,
+			    g_ri_count, q_pending_len);
+		}
+		if (len <= sizeof(q_pending) && q_pending_len == 0) {
 			memcpy(q_pending, data, len);
 			q_pending_len = len;
 		}
@@ -1168,6 +1185,10 @@ wlan_tftp_data(struct tftp_sess *s, uint32_t block)
 		    (s->size + s->blk - 1) / s->blk);
 	}
 	wlan_tftp_reply(s, 4 + n);
+	if (block <= 3) {
+		printf("SWEET WLAN: tftp %s block %u -> q %u tx %u\n",
+		    s->name, block, q_pending_len, g_tx_msgs);
+	}
 }
 
 /* Send up to wsize DATA blocks, stopping at the real end of the file. */
@@ -1534,13 +1555,16 @@ wlan_tftp_sess_rx(uint32_t port, const uint8_t *d, uint32_t len)
 		if (s->write) {
 			break;
 		}
+		if (block <= 20 || (block % 100) == 0) {
+			printf("SWEET WLAN: tftp %s ack %u (sent %u)\n",
+			    s->name, block, s->sent);
+		}
 		if (block == 0) {
 			/*
 			 * Some clients skip ACK 0 and wait for DATA 1; the
 			 * early window below covers that, and a late ACK 0
 			 * just re-sends it (duplicates are harmless).
 			 */
-			printf("SWEET WLAN: tftp %s ack 0\n", s->name);
 			wlan_tftp_window(s, 1);
 		} else if (block < s->sent) {
 			wlan_tftp_window(s, block + 1); /* cumulative ACK */
@@ -2623,6 +2647,12 @@ wlan_rx_one(void)
 				g_ri[g_ri_count].size = pair[0];
 				g_ri[g_ri_count].id = pair[1];
 				g_ri[g_ri_count].used = FALSE;
+				if (pair[0] != g_last_intent_size) {
+					g_last_intent_size = pair[0];
+					printf("SWEET WLAN: glink intent %x "
+					    "bytes id %x\n", pair[0],
+					    pair[1]);
+				}
 				g_ri_count++;
 			}
 		}
