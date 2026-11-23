@@ -45,7 +45,7 @@ enum {
 	kLavMetal       = 5,
 };
 
-#define LAV_BUFFERS     1024
+#define LAV_BUFFERS     256
 #define LAV_BUFFER_MAX  (16ull << 20)
 #define LAV_SUBMIT_MAX  16384           /* bytes of PM4 words in one stream */
 

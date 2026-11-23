@@ -1,5 +1,5 @@
 diff --git a/iokit/Kernel/arm/LavenderGPU.cpp b/iokit/Kernel/arm/LavenderGPU.cpp
-index 6cae868..8c36353 100644
+index 6cae868..18f5a43 100644
 --- a/iokit/Kernel/arm/LavenderGPU.cpp
 +++ b/iokit/Kernel/arm/LavenderGPU.cpp
 @@ -45,7 +45,7 @@ enum {
@@ -7,7 +7,7 @@ index 6cae868..8c36353 100644
  };
  
 -#define LAV_BUFFERS     64
-+#define LAV_BUFFERS     1024
++#define LAV_BUFFERS     256
  #define LAV_BUFFER_MAX  (16ull << 20)
  #define LAV_SUBMIT_MAX  16384           /* bytes of PM4 words in one stream */
  
