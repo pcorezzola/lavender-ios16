@@ -26,6 +26,7 @@
 #include <IOKit/IOService.h>
 #include <IOKit/IOUserClient.h>
 #include <IOKit/IOBufferMemoryDescriptor.h>
+#include <IOKit/IOSubMemoryDescriptor.h>
 #include <mach/vm_param.h>
 #include <sys/systm.h>
 
