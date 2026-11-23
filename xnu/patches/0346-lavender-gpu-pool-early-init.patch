@@ -1,5 +1,5 @@
 diff --git a/iokit/Kernel/arm/LavenderGPU.cpp b/iokit/Kernel/arm/LavenderGPU.cpp
-index 8baf5c3..8cd00e0 100644
+index 8baf5c3..65eb4ab 100644
 --- a/iokit/Kernel/arm/LavenderGPU.cpp
 +++ b/iokit/Kernel/arm/LavenderGPU.cpp
 @@ -27,6 +27,7 @@
@@ -37,12 +37,11 @@ index 8baf5c3..8cd00e0 100644
  void
  LavenderGPUStart(void)
  {
-@@ -274,6 +295,8 @@ LavenderGPUUserClient::clientMemoryForType(UInt32 type, IOOptionBits * options,
+@@ -274,6 +295,7 @@ LavenderGPUUserClient::clientMemoryForType(UInt32 type, IOOptionBits * options,
  		fMemory[type - 1]->retain();
  		*memory = fMemory[type - 1];
  		*options = fPoolN[type - 1] != 0 ? kIOMapWriteCombineCache : 0;
-+		IOLog("LavenderGPU: map of buffer %u (%s)
-+", (unsigned)type, fPoolN[type - 1] != 0 ? "pool" : "own");
++		IOLog("LavenderGPU: map of buffer %u (%s)\n", (unsigned)type, fPoolN[type - 1] != 0 ? "pool" : "own");
  		ret = kIOReturnSuccess;
  	}
  	IOLockUnlock(gLavLock);

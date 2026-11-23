@@ -295,8 +295,7 @@ LavenderGPUUserClient::clientMemoryForType(UInt32 type, IOOptionBits * options, 
 		fMemory[type - 1]->retain();
 		*memory = fMemory[type - 1];
 		*options = fPoolN[type - 1] != 0 ? kIOMapWriteCombineCache : 0;
-		IOLog("LavenderGPU: map of buffer %u (%s)
-", (unsigned)type, fPoolN[type - 1] != 0 ? "pool" : "own");
+		IOLog("LavenderGPU: map of buffer %u (%s)\n", (unsigned)type, fPoolN[type - 1] != 0 ? "pool" : "own");
 		ret = kIOReturnSuccess;
 	}
 	IOLockUnlock(gLavLock);
