@@ -1,0 +1,62 @@
+diff --git a/bsd/dev/lavender_wlan.c b/bsd/dev/lavender_wlan.c
+index e2efc3c..a14eea1 100644
+--- a/bsd/dev/lavender_wlan.c
++++ b/bsd/dev/lavender_wlan.c
+@@ -843,7 +843,7 @@ static uint8_t q_pending[4 + TFTP_BLK + 80];
+ static uint32_t q_pending_len;
+ static unsigned g_ms, g_tx_msgs, g_rx_msgs;
+ static uint32_t g_last_desc[4];
+-static uint32_t g_last_intent_size, g_last_miss_len;
++static uint32_t g_last_intent_size, g_last_miss_len, g_max_intent_size;
+ 
+ static void
+ wlan_mb(void)
+@@ -1210,6 +1210,14 @@ wlan_tftp_window(struct tftp_sess *s, uint32_t from)
+ 		if (off >= s->size) {
+ 			break;          /* past the last real block */
+ 		}
++		/*
++		 * There is only one pending slot: a second block sent while
++		 * it is busy is dropped silently (the modem grants RX
++		 * intents at its own pace). Stop and let the ACKs drive.
++		 */
++		if (q_pending_len != 0) {
++			break;
++		}
+ 		wlan_tftp_data(s, block);
+ 		if (s->last) {
+ 			break;
+@@ -1456,6 +1464,23 @@ wlan_tftp_req(uint32_t node, uint32_t port, const uint8_t *d, uint32_t len)
+ 	if (s->blk > 4096) {
+ 		s->blk = 4096;
+ 	}
++	/*
++	 * Each DATA also carries a GLINK data header (8 B), a QRTR header
++	 * (~24 B) and the 4-byte TFTP header, and the modem only accepts a
++	 * packet that fits an RX intent it granted. If those intents are
++	 * smaller than the requested block, negotiate a block that fits
++	 * (RFC 2347 allows lowering it) instead of dropping every DATA.
++	 */
++	if (g_max_intent_size > 512) {
++		uint32_t fit = (g_max_intent_size - 128) & ~7u;
++
++		if (fit < 512) {
++			fit = 512;
++		}
++		if (s->blk > fit) {
++			s->blk = fit;
++		}
++	}
+ 	if (op == TFTP_WRQ) {
+ 		unsigned k = 0;
+ 
+@@ -2653,6 +2678,9 @@ wlan_rx_one(void)
+ 					    "bytes id %x\n", pair[0],
+ 					    pair[1]);
+ 				}
++				if (pair[0] > g_max_intent_size) {
++					g_max_intent_size = pair[0];
++				}
+ 				g_ri_count++;
+ 			}
+ 		}
