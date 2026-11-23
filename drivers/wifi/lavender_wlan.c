@@ -1112,6 +1112,8 @@ static uint8_t t_wr[64 * 1024];
 static uint32_t t_wr_len;
 static char t_wr_name[64];
 
+static void wlan_tftp_sess_rx(uint32_t port, const uint8_t *d, uint32_t len);
+
 static void
 wlan_tftp_reply(struct tftp_sess *s, uint32_t n)
 {
@@ -1161,7 +1163,7 @@ wlan_tftp_data(struct tftp_sess *s, uint32_t block)
 	t_pkt[3] = (uint8_t)block;
 	s->sent = block;
 	s->last = n < s->blk;
-	if ((block % 100) == 0) {
+	if (block <= 3 || (block % 100) == 0) {
 		printf("SWEET WLAN: tftp %s block %u/%u\n", s->name, block,
 		    (s->size + s->blk - 1) / s->blk);
 	}
@@ -1302,6 +1304,25 @@ wlan_tftp_req(uint32_t node, uint32_t port, const uint8_t *d, uint32_t len)
 	}
 	op = (uint16_t)((d[0] << 8) | d[1]);
 	if (op != TFTP_RRQ && op != TFTP_WRQ) {
+		/*
+		 * Some clients ACK the OACK to the well-known port instead
+		 * of the transfer port; route it to the matching session.
+		 */
+		for (unsigned i = 0; i < TFTP_MAX_SESS; i++) {
+			if (t_sess[i].used && t_sess[i].node == node &&
+			    t_sess[i].rport == port) {
+				printf("SWEET WLAN: tftp op %u block %u at "
+				    "server port, routed to %x\n", op,
+				    len >= 4 ? (d[2] << 8) | d[3] : 0,
+				    t_sess[i].port);
+				wlan_tftp_sess_rx(t_sess[i].port, d, len);
+				return;
+			}
+		}
+		if (len >= 4) {
+			printf("SWEET WLAN: tftp op %u block %u at server port "
+			    "from %x\n", op, (d[2] << 8) | d[3], port);
+		}
 		return;
 	}
 	{
@@ -1475,6 +1496,17 @@ wlan_tftp_req(uint32_t node, uint32_t port, const uint8_t *d, uint32_t len)
 		    "%u tsize %u seek %u\n", s->blk, s->rsize, s->wsize,
 		    s->timeout, s->has_tsize, s->seek);
 		wlan_tftp_oack(s);
+		/*
+		 * Start the window right after the OACK, but only for the
+		 * real transfer (rsize = file size); the rsize-0 RRQs are
+		 * the eloader's size checks and must end with ERROR 9.
+		 * In the 0742 boot the eloader waited 10 s after the real
+		 * RRQ without ever sending ACK 0, then moved to the next
+		 * file. If it does ACK 0, the handler re-sends the window.
+		 */
+		if (s->has_rsize && s->rsize != 0) {
+			wlan_tftp_window(s, 1);
+		}
 	} else {
 		wlan_tftp_data(s, 1);
 	}
@@ -1503,10 +1535,13 @@ wlan_tftp_sess_rx(uint32_t port, const uint8_t *d, uint32_t len)
 			break;
 		}
 		if (block == 0) {
-			/* A duplicated ACK 0 must not restart the transfer. */
-			if (s->sent == 0) {
-				wlan_tftp_window(s, 1);
-			}
+			/*
+			 * Some clients skip ACK 0 and wait for DATA 1; the
+			 * early window below covers that, and a late ACK 0
+			 * just re-sends it (duplicates are harmless).
+			 */
+			printf("SWEET WLAN: tftp %s ack 0\n", s->name);
+			wlan_tftp_window(s, 1);
 		} else if (block < s->sent) {
 			wlan_tftp_window(s, block + 1); /* cumulative ACK */
 		} else if (block == s->sent) {
