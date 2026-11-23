@@ -29,7 +29,7 @@ PAS id 1, carve-out `0x92a00000` + 30 MiB). No hay que portar WCD9335 ni tocar S
 | F2 | Carga PAS del ADSP + SMP2P READY (`lavaud=4..6`, parches 0503–0508) | ✅ COMPLETA (AUTH 0/0, ADSP arranca, 429+kick; GLINK sigue en F3) |
 | F3 | GLINK `lpass` + APR (`0509`/`0509b`) | ✅ COMPLETA (VERSION/OPEN + APR responde `0x110e8`) |
 | F4 | Códec analógico PM660L por SPMI (`0510`) | ⬜ PENDIENTE |
-| F5 | Códec digital LPASS + SWR + AFE `INT4_MI2S_RX` (`0511`) | ⬜ PENDIENTE |
+| F5 | Códec digital LPASS + SWR + AFE `INT4_MI2S_RX` (`0511`) | ✅ AFE COMPLETO (clock/config/start status 0) |
 | F6 | ASM/ADM + tono de prueba 1 kHz (`0512`) | ⬜ PENDIENTE |
 | F7 | iOS: `/dev/lavender-audio` + plug-in HAL (`0513`) | ⬜ PENDIENTE |
 | F8 | Micrófono, jack/MBHC, volumen, suspend (`0514`+) | ⬜ PENDIENTE |
@@ -141,11 +141,14 @@ PAS id 1, carve-out `0x92a00000` + 30 MiB). No hay que portar WCD9335 ni tocar S
       (el observer actual es read-only); diseñarlo con cuidado.
 - [ ] **Criterio de éxito:** rutas del códec programadas y speaker path listo
 
-## F5 — Códec digital LPASS + SWR + AFE — ⬜ PENDIENTE (`0511`)
+## F5 — Códec digital LPASS + SWR + AFE — ✅ AFE COMPLETO (`0511`/`0511b`)
 
-- [ ] LPASS digital codec `0x152c0000` + maestro SoundWire `0x152c1000`
-- [ ] AFE port `INT4_MI2S_RX` arriba (reloj/SD line para el speaker)
-- [ ] **Criterio de éxito:** el AFE reporta el puerto listo
+- [x] AFE `INT4_MI2S_RX` (0x1036): `SET_PARAM_V2` I2S 48 kHz/16-bit/SD0 y
+      `DEVICE_START` → **status 0**.
+- [x] Clock MI2S `0x113` (`INT4_MI2S_IBIT`) 1.536 MHz → **status 0**.
+- [ ] LPASS digital codec `0x152c0000` + maestro SoundWire `0x152c1000`:
+      revisar si el path PM660L los necesita o si el AFE ya cubre el I2S.
+- [x] **Criterio de éxito:** el AFE acepta el puerto (clock/config/start status 0).
 
 ## F6 — ASM/ADM + tono de prueba — ⬜ PENDIENTE (`0512`)
 
