@@ -1,16 +1,17 @@
 diff --git a/iokit/Kernel/arm/LavenderGPU.cpp b/iokit/Kernel/arm/LavenderGPU.cpp
-index 8baf5c3..90259e0 100644
+index 8baf5c3..a472035 100644
 --- a/iokit/Kernel/arm/LavenderGPU.cpp
 +++ b/iokit/Kernel/arm/LavenderGPU.cpp
-@@ -27,6 +27,7 @@
+@@ -27,6 +27,8 @@
  #include <IOKit/IOUserClient.h>
  #include <IOKit/IOBufferMemoryDescriptor.h>
  #include <IOKit/IOSubMemoryDescriptor.h>
 +#include <pexpert/pexpert.h>
++#include <kern/thread.h>
  #include <mach/vm_param.h>
  #include <sys/systm.h>
  
-@@ -88,6 +89,7 @@ lavPoolInit(void)
+@@ -88,6 +90,7 @@ lavPoolInit(void)
  	static const uint64_t sizes[] = { 128ull << 20, 64ull << 20, 32ull << 20, 16ull << 20, 8ull << 20, 4ull << 20 };
  
  	for (unsigned i = 0; i < sizeof(sizes) / sizeof(sizes[0]) && gPool == NULL; i++) {
@@ -18,7 +19,7 @@ index 8baf5c3..90259e0 100644
  		IOBufferMemoryDescriptor * m = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,
  		    kIODirectionInOut | kIOMemoryPhysicallyContiguous | kIOMapWriteCombineCache, sizes[i], 0x00000000FFFFF000ULL);
  
-@@ -149,6 +151,28 @@ LavenderGPU::start(IOService * provider)
+@@ -149,6 +152,44 @@ LavenderGPU::start(IOService * provider)
  	return true;
  }
  
@@ -26,28 +27,56 @@ index 8baf5c3..90259e0 100644
 + * Called from iokit_post_constructor_init, before any matching: the pool is taken while the low memory is still whole. By the time the
 + * GPU's ring comes up (~110 s into boot) nothing bigger than 4 MB is left in one piece below 4 GB.
 + */
++static volatile uint32_t gPoolState;            /* 0 untried, 1 the early thread is on it, 2 it is finished */
++
++static void
++lavPoolThread(void * arg, wait_result_t wr)
++{
++	(void)arg;
++	(void)wr;
++	printf("LavenderGPU: early pool: thread start\n");
++	lavPoolInit();
++	printf("LavenderGPU: early pool: done, pool %s\n", gPool != NULL ? "ok" : "none");
++	gPoolState = 2;
++	thread_terminate(current_thread());
++}
++
 +extern "C" void
 +LavenderGPUPoolEarly(void)
 +{
 +	uint32_t v = 0;
++	thread_t thread;
 +
 +	if (!PE_parse_boot_argn("lavgpu", &v, sizeof(v)) || v == 0) {
 +		return;
 +	}
-+	printf("LavenderGPU: early pool: start\n");
 +	if (gLavLock == NULL) {
 +		gLavLock = IOLockAlloc();
 +	}
-+	if (gPool == NULL) {
-+		lavPoolInit();
++	gPoolState = 1;
++	if (kernel_thread_start(lavPoolThread, NULL, &thread) == KERN_SUCCESS) {
++		thread_deallocate(thread);
++	} else {
++		gPoolState = 0;
 +	}
-+	printf("LavenderGPU: early pool: done, pool %s\n", gPool != NULL ? "ok" : "none");
 +}
 +
  void
  LavenderGPUStart(void)
  {
-@@ -274,6 +298,7 @@ LavenderGPUUserClient::clientMemoryForType(UInt32 type, IOOptionBits * options,
+@@ -158,7 +199,10 @@ LavenderGPUStart(void)
+ 	if (gLavLock == NULL) {
+ 		gLavLock = IOLockAlloc();
+ 	}
+-	if (gPool == NULL) {
++	for (int w = 0; gPoolState == 1 && w < 1200; w++) {   /* the early thread may still be looking: up to 2 minutes */
++		IOSleep(100);
++	}
++	if (gPool == NULL && gPoolState != 1) {
+ 		lavPoolInit();
+ 	}
+ 	gpu = OSTypeAlloc(LavenderGPU);
+@@ -274,6 +318,7 @@ LavenderGPUUserClient::clientMemoryForType(UInt32 type, IOOptionBits * options,
  		fMemory[type - 1]->retain();
  		*memory = fMemory[type - 1];
  		*options = fPoolN[type - 1] != 0 ? kIOMapWriteCombineCache : 0;

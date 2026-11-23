@@ -28,6 +28,7 @@
 #include <IOKit/IOBufferMemoryDescriptor.h>
 #include <IOKit/IOSubMemoryDescriptor.h>
 #include <pexpert/pexpert.h>
+#include <kern/thread.h>
 #include <mach/vm_param.h>
 #include <sys/systm.h>
 
@@ -155,22 +156,38 @@ LavenderGPU::start(IOService * provider)
  * Called from iokit_post_constructor_init, before any matching: the pool is taken while the low memory is still whole. By the time the
  * GPU's ring comes up (~110 s into boot) nothing bigger than 4 MB is left in one piece below 4 GB.
  */
+static volatile uint32_t gPoolState;            /* 0 untried, 1 the early thread is on it, 2 it is finished */
+
+static void
+lavPoolThread(void * arg, wait_result_t wr)
+{
+	(void)arg;
+	(void)wr;
+	printf("LavenderGPU: early pool: thread start\n");
+	lavPoolInit();
+	printf("LavenderGPU: early pool: done, pool %s\n", gPool != NULL ? "ok" : "none");
+	gPoolState = 2;
+	thread_terminate(current_thread());
+}
+
 extern "C" void
 LavenderGPUPoolEarly(void)
 {
 	uint32_t v = 0;
+	thread_t thread;
 
 	if (!PE_parse_boot_argn("lavgpu", &v, sizeof(v)) || v == 0) {
 		return;
 	}
-	printf("LavenderGPU: early pool: start\n");
 	if (gLavLock == NULL) {
 		gLavLock = IOLockAlloc();
 	}
-	if (gPool == NULL) {
-		lavPoolInit();
+	gPoolState = 1;
+	if (kernel_thread_start(lavPoolThread, NULL, &thread) == KERN_SUCCESS) {
+		thread_deallocate(thread);
+	} else {
+		gPoolState = 0;
 	}
-	printf("LavenderGPU: early pool: done, pool %s\n", gPool != NULL ? "ok" : "none");
 }
 
 void
@@ -182,7 +199,10 @@ LavenderGPUStart(void)
 	if (gLavLock == NULL) {
 		gLavLock = IOLockAlloc();
 	}
-	if (gPool == NULL) {
+	for (int w = 0; gPoolState == 1 && w < 1200; w++) {   /* the early thread may still be looking: up to 2 minutes */
+		IOSleep(100);
+	}
+	if (gPool == NULL && gPoolState != 1) {
 		lavPoolInit();
 	}
 	gpu = OSTypeAlloc(LavenderGPU);
