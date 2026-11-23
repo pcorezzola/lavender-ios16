@@ -816,7 +816,12 @@ lavender_modem_fw_read(const char *name, uint32_t off, void *dst, uint32_t len)
 		return 0;
 	}
 	len = MIN(len, size - off);
-	while (pos < off) {
+	/*
+	 * Stop on the cluster that contains off: with a blksize smaller than
+	 * the cluster, off can fall in the middle of one. Advancing one more
+	 * made (off + done) - pos underflow and the copy walk off bounce.
+	 */
+	while (pos + fat_cluster_bytes <= off) {
 		cluster = fat_next(cluster);
 		if (cluster < 2 || cluster >= FAT_MAX_CLUSTER) {
 			return EIO;

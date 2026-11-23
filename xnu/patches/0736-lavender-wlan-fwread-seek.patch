@@ -1,0 +1,57 @@
+diff --git a/bsd/dev/lavender_modem.c b/bsd/dev/lavender_modem.c
+index f25a054..9ef1574 100644
+--- a/bsd/dev/lavender_modem.c
++++ b/bsd/dev/lavender_modem.c
+@@ -816,7 +816,12 @@ lavender_modem_fw_read(const char *name, uint32_t off, void *dst, uint32_t len)
+ 		return 0;
+ 	}
+ 	len = MIN(len, size - off);
+-	while (pos < off) {
++	/*
++	 * Stop on the cluster that contains off: with a blksize smaller than
++	 * the cluster, off can fall in the middle of one. Advancing one more
++	 * made (off + done) - pos underflow and the copy walk off bounce.
++	 */
++	while (pos + fat_cluster_bytes <= off) {
+ 		cluster = fat_next(cluster);
+ 		if (cluster < 2 || cluster >= FAT_MAX_CLUSTER) {
+ 			return EIO;
+diff --git a/bsd/dev/lavender_wlan.c b/bsd/dev/lavender_wlan.c
+index c64457b..0602be2 100644
+--- a/bsd/dev/lavender_wlan.c
++++ b/bsd/dev/lavender_wlan.c
+@@ -1135,7 +1135,7 @@ wlan_tftp_error(struct tftp_sess *s, uint16_t code, const char *msg)
+ static void
+ wlan_tftp_data(struct tftp_sess *s, uint32_t block)
+ {
+-	uint32_t off = (block - 1) * s->blk;
++	uint32_t off = s->seek + (block - 1) * s->blk;
+ 	uint32_t n = 0;
+ 	int r;
+ 
+@@ -1228,19 +1228,19 @@ wlan_tftp_u32(uint8_t *p, uint32_t *n, uint32_t v)
+ static void
+ wlan_tftp_oack(struct tftp_sess *s)
+ {
+-	static const char *keys[5] = { "blksize", "rsize", "wsize",
+-	    "timeoutms", "tsize" };
+-	boolean_t use[5] = { TRUE, s->has_rsize, s->has_wsize,
+-	    s->has_timeout, s->has_tsize };
++	static const char *keys[6] = { "blksize", "rsize", "wsize",
++	    "timeoutms", "tsize", "seek" };
++	boolean_t use[6] = { TRUE, s->has_rsize, s->has_wsize,
++	    s->has_timeout, s->has_tsize, s->has_seek };
+ 	uint32_t n = 4;
+ 
+ 	t_pkt[0] = 0;
+ 	t_pkt[1] = TFTP_OACK;
+-	for (int i = 0; i < 5; i++) {
++	for (int i = 0; i < 6; i++) {
+ 		const char *k = keys[i];
+ 		uint32_t v = i == 0 ? s->blk : i == 1 ? s->rsize :
+ 		    i == 2 ? s->wsize : i == 3 ? s->timeout :
+-		    (s->write ? 0 : s->size);
++		    i == 4 ? (s->write ? 0 : s->size) : s->seek;
+ 
+ 		if (!use[i]) {
+ 			continue;
