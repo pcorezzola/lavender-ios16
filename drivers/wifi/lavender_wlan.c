@@ -1347,8 +1347,7 @@ wlan_tftp_req(uint32_t node, uint32_t port, const uint8_t *d, uint32_t len)
 		}
 		opts = TRUE;
 		if (strcasecmp(key, "blksize") == 0 && v >= 8 && v <= TFTP_BLK) {
-			s->blk = v;
-		} else if (strcasecmp(key, "wsize") == 0 && v >= 1 && v <= 64) {
+			s->blk = v;		} else if (strcasecmp(key, "wsize") == 0 && v >= 1 && v <= 64) {
 			s->wsize = v;
 			s->has_wsize = TRUE;
 		} else if (strcasecmp(key, "timeoutms") == 0 && v >= 1) {
@@ -1363,6 +1362,14 @@ wlan_tftp_req(uint32_t node, uint32_t port, const uint8_t *d, uint32_t len)
 			s->seek = v;
 			s->has_seek = TRUE;
 		}
+	}
+	/*
+	 * A 7680-byte DATA plus the GLINK header leaves the 16 KiB TX FIFO
+	 * with less headroom than the next block needs, and wlan_tx_write
+	 * blocks forever. Negotiate a smaller block; RFC 2347 allows it.
+	 */
+	if (s->blk > 4096) {
+		s->blk = 4096;
 	}
 	if (op == TFTP_WRQ) {
 		unsigned k = 0;
