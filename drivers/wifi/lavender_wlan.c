@@ -1457,12 +1457,13 @@ wlan_tftp_req(uint32_t node, uint32_t port, const uint8_t *d, uint32_t len)
 		}
 	}
 	/*
-	 * A 7680-byte DATA plus the GLINK header leaves the 16 KiB TX FIFO
-	 * with less headroom than the next block needs, and wlan_tx_write
-	 * blocks forever. Negotiate a smaller block; RFC 2347 allows it.
+	 * 0746: the modem grants intents of 128, 512, 1152 and 8320 bytes,
+	 * and 4096-byte DATA (4132 with headers) entered an 8320 intent but
+	 * never reached the TFTP client. Negotiate 1024 so each DATA fits
+	 * the 1152-byte intent (RFC 2347 allows lowering the block).
 	 */
-	if (s->blk > 4096) {
-		s->blk = 4096;
+	if (s->blk > 1024) {
+		s->blk = 1024;
 	}
 	/*
 	 * Each DATA also carries a GLINK data header (8 B), a QRTR header
@@ -2587,7 +2588,20 @@ wlan_qrtr_rx(const uint8_t *p, uint32_t len)
 		(void)wlan_svc_rx(src_node, src_port, dst_port, p + hlen,
 		    size);
 		break;
+	case QRTR_TYPE_RESUME_TX:
+		/*
+		 * The modem confirms our DATA with RESUME_TX; for the TFTP
+		 * session ports that proves it consumed the packet.
+		 */
+		if (dst_port >= PORT_SESS_BASE &&
+		    dst_port < PORT_SESS_BASE + TFTP_MAX_SESS) {
+			printf("SWEET WLAN: qrtr RESUME_TX node %u port %x "
+			    "to %x\n", src_node, src_port, dst_port);
+		}
+		break;
 	default:
+		printf("SWEET WLAN: qrtr type %u node %u port %x to %x "
+		    "size %u\n", type, src_node, src_port, dst_port, size);
 		break;
 	}
 }
