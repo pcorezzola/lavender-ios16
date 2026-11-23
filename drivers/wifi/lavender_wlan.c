@@ -1224,32 +1224,49 @@ wlan_tftp_u32(uint8_t *p, uint32_t *n, uint32_t v)
 	}
 }
 
-/* Echo every option the modem asked for; clients abort on a partial OACK. */
+/* Echo one option name (NUL-terminated) into the OACK packet. */
+static void
+wlan_tftp_key(uint8_t *p, uint32_t *n, const char *k)
+{
+	while (*k != 0) {
+		p[(*n)++] = (uint8_t)*k++;
+	}
+	p[(*n)++] = 0;
+}
+
+/*
+ * The modem's TFTP client demands the tqftpserv layout, with timeoutms and
+ * wsize always present: blksize, timeoutms, tsize, wsize, rsize, seek.
+ */
 static void
 wlan_tftp_oack(struct tftp_sess *s)
 {
-	static const char *keys[6] = { "blksize", "rsize", "wsize",
-	    "timeoutms", "tsize", "seek" };
-	boolean_t use[6] = { TRUE, s->has_rsize, s->has_wsize,
-	    s->has_timeout, s->has_tsize, s->has_seek };
 	uint32_t n = 4;
 
 	t_pkt[0] = 0;
 	t_pkt[1] = TFTP_OACK;
-	for (int i = 0; i < 6; i++) {
-		const char *k = keys[i];
-		uint32_t v = i == 0 ? s->blk : i == 1 ? s->rsize :
-		    i == 2 ? s->wsize : i == 3 ? s->timeout :
-		    i == 4 ? (s->write ? 0 : s->size) : s->seek;
-
-		if (!use[i]) {
-			continue;
-		}
-		while (*k != 0) {
-			t_pkt[n++] = (uint8_t)*k++;
-		}
+	wlan_tftp_key(t_pkt, &n, "blksize");
+	wlan_tftp_u32(t_pkt, &n, s->blk);
+	t_pkt[n++] = 0;
+	wlan_tftp_key(t_pkt, &n, "timeoutms");
+	wlan_tftp_u32(t_pkt, &n, s->has_timeout ? s->timeout : 1000);
+	t_pkt[n++] = 0;
+	if (s->has_tsize) {
+		wlan_tftp_key(t_pkt, &n, "tsize");
+		wlan_tftp_u32(t_pkt, &n, s->write ? 0 : s->size);
 		t_pkt[n++] = 0;
-		wlan_tftp_u32(t_pkt, &n, v);
+	}
+	wlan_tftp_key(t_pkt, &n, "wsize");
+	wlan_tftp_u32(t_pkt, &n, s->has_wsize ? s->wsize : 1);
+	t_pkt[n++] = 0;
+	if (s->has_rsize && s->rsize != 0) {
+		wlan_tftp_key(t_pkt, &n, "rsize");
+		wlan_tftp_u32(t_pkt, &n, s->rsize);
+		t_pkt[n++] = 0;
+	}
+	if (s->has_seek) {
+		wlan_tftp_key(t_pkt, &n, "seek");
+		wlan_tftp_u32(t_pkt, &n, s->seek);
 		t_pkt[n++] = 0;
 	}
 	wlan_tftp_reply(s, n);
