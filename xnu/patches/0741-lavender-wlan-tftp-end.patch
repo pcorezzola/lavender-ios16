@@ -1,0 +1,35 @@
+diff --git a/bsd/dev/lavender_wlan.c b/bsd/dev/lavender_wlan.c
+index 0cfd0ae..42f7b65 100644
+--- a/bsd/dev/lavender_wlan.c
++++ b/bsd/dev/lavender_wlan.c
+@@ -1159,10 +1159,14 @@ wlan_tftp_data(struct tftp_sess *s, uint32_t block)
+ 	t_pkt[3] = (uint8_t)block;
+ 	s->sent = block;
+ 	s->last = n < s->blk;
++	if ((block % 100) == 0) {
++		printf("SWEET WLAN: tftp %s block %u/%u\n", s->name, block,
++		    (s->size + s->blk - 1) / s->blk);
++	}
+ 	wlan_tftp_reply(s, 4 + n);
+ }
+ 
+-/* Send up to wsize DATA blocks; the client consumes the FIFO as it goes. */
++/* Send up to wsize DATA blocks, stopping at the real end of the file. */
+ static void
+ wlan_tftp_window(struct tftp_sess *s, uint32_t from)
+ {
+@@ -1175,7 +1179,13 @@ wlan_tftp_window(struct tftp_sess *s, uint32_t from)
+ 		n = 16;
+ 	}
+ 	for (uint32_t k = 0; k < n; k++) {
+-		wlan_tftp_data(s, from + k);
++		uint32_t block = from + k;
++		uint32_t off = s->seek + (block - 1) * s->blk;
++
++		if (off >= s->size) {
++			break;          /* past the last real block */
++		}
++		wlan_tftp_data(s, block);
+ 		if (s->last) {
+ 			break;
+ 		}
