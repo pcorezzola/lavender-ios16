@@ -33,6 +33,7 @@ DRIVERS = {
     ],
     "gpu": ["bsd/dev/lavender_gpu.c"],
     "audio": ["bsd/dev/lavender_audio.c"],
+    "camera": ["bsd/dev/lavender_cam.c"],
     "touch": ["bsd/dev/sweet_touch.c"],
     "wifi": [
         "bsd/dev/lavender_modem.c",

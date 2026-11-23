@@ -5041,6 +5041,13 @@ santoni_sdhci_init(void)
 	/* After the log: the WHYRED FB lines belong in the SYSTEM ring. */
 	santoni_fb_test();
 #if defined(ARM64_BOARD_CONFIG_LAVENDER)
+	/* 1001: boot-arg lvcam=N, SDM660 camera platform probe (F0). */
+	{
+		extern int lavender_cam_probe(void);
+		(void)lavender_cam_probe();
+	}
+#endif
+#if defined(ARM64_BOARD_CONFIG_LAVENDER)
 	/* 0500: boot-arg lavaud=N, SDM660 audio platform probe (read only). */
 	{
 		extern int lavender_audio_probe(void);
