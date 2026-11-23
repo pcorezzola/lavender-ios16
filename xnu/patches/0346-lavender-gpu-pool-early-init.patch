@@ -1,0 +1,48 @@
+diff --git a/iokit/Kernel/arm/LavenderGPU.cpp b/iokit/Kernel/arm/LavenderGPU.cpp
+index 8baf5c3..8cd00e0 100644
+--- a/iokit/Kernel/arm/LavenderGPU.cpp
++++ b/iokit/Kernel/arm/LavenderGPU.cpp
+@@ -27,6 +27,7 @@
+ #include <IOKit/IOUserClient.h>
+ #include <IOKit/IOBufferMemoryDescriptor.h>
+ #include <IOKit/IOSubMemoryDescriptor.h>
++#include <pexpert/pexpert.h>
+ #include <mach/vm_param.h>
+ #include <sys/systm.h>
+ 
+@@ -149,6 +150,26 @@ LavenderGPU::start(IOService * provider)
+ 	return true;
+ }
+ 
++/*
++ * Called from iokit_post_constructor_init, before any matching: the pool is taken while the low memory is still whole. By the time the
++ * GPU's ring comes up (~110 s into boot) nothing bigger than 4 MB is left in one piece below 4 GB.
++ */
++extern "C" void
++LavenderGPUPoolEarly(void)
++{
++	uint32_t v = 0;
++
++	if (!PE_parse_boot_argn("lavgpu", &v, sizeof(v)) || v == 0) {
++		return;
++	}
++	if (gLavLock == NULL) {
++		gLavLock = IOLockAlloc();
++	}
++	if (gPool == NULL) {
++		lavPoolInit();
++	}
++}
++
+ void
+ LavenderGPUStart(void)
+ {
+@@ -274,6 +295,8 @@ LavenderGPUUserClient::clientMemoryForType(UInt32 type, IOOptionBits * options,
+ 		fMemory[type - 1]->retain();
+ 		*memory = fMemory[type - 1];
+ 		*options = fPoolN[type - 1] != 0 ? kIOMapWriteCombineCache : 0;
++		IOLog("LavenderGPU: map of buffer %u (%s)
++", (unsigned)type, fPoolN[type - 1] != 0 ? "pool" : "own");
+ 		ret = kIOReturnSuccess;
+ 	}
+ 	IOLockUnlock(gLavLock);
