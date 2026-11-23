@@ -1,5 +1,5 @@
 diff --git a/iokit/Kernel/IOStartIOKit.cpp b/iokit/Kernel/IOStartIOKit.cpp
-index d74c063..0a46ced 100644
+index d74c063..99764ad 100644
 --- a/iokit/Kernel/IOStartIOKit.cpp
 +++ b/iokit/Kernel/IOStartIOKit.cpp
 @@ -57,6 +57,7 @@ extern "C" {
@@ -10,13 +10,14 @@ index d74c063..0a46ced 100644
  void IORegistrySetOSBuildVersion(char * build_version);
  void IORecordProgressBackbuffer(void * buffer, size_t size, uint32_t theme);
  
-@@ -162,6 +163,9 @@ InitIOKit(void *dtTop)
- 	}
- 	gRootNub->attach(NULL);
- 
-+	/* lavender: the GPU's contiguous pool, before the low memory is fragmented */
+@@ -182,6 +183,10 @@ StartIOKitMatching(void)
+ {
+ 	SOCD_TRACE_XNU(START_IOKIT);
+ 	assert(gRootNub != NULL);
++
++	/* lavender: the GPU's contiguous pool, before userland fragments the low memory */
 +	LavenderGPUPoolEarly();
 +
- 	/* If the bootstrap segment set up a function to record startup
- 	 * extensions, call it now.
- 	 */
+ 	bool ok = gRootNub->startIOServiceMatching();
+ 	if (__improbable(!ok)) {
+ 		panic("Failed to start IOService matching");

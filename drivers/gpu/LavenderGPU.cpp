@@ -89,6 +89,7 @@ lavPoolInit(void)
 	static const uint64_t sizes[] = { 128ull << 20, 64ull << 20, 32ull << 20, 16ull << 20, 8ull << 20, 4ull << 20 };
 
 	for (unsigned i = 0; i < sizeof(sizes) / sizeof(sizes[0]) && gPool == NULL; i++) {
+		printf("LavenderGPU: pool of %llu MB: trying\n", sizes[i] >> 20);
 		IOBufferMemoryDescriptor * m = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,
 		    kIODirectionInOut | kIOMemoryPhysicallyContiguous | kIOMapWriteCombineCache, sizes[i], 0x00000000FFFFF000ULL);
 
@@ -162,12 +163,14 @@ LavenderGPUPoolEarly(void)
 	if (!PE_parse_boot_argn("lavgpu", &v, sizeof(v)) || v == 0) {
 		return;
 	}
+	printf("LavenderGPU: early pool: start\n");
 	if (gLavLock == NULL) {
 		gLavLock = IOLockAlloc();
 	}
 	if (gPool == NULL) {
 		lavPoolInit();
 	}
+	printf("LavenderGPU: early pool: done, pool %s\n", gPool != NULL ? "ok" : "none");
 }
 
 void

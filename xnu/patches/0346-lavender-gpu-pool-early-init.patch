@@ -1,5 +1,5 @@
 diff --git a/iokit/Kernel/arm/LavenderGPU.cpp b/iokit/Kernel/arm/LavenderGPU.cpp
-index 8baf5c3..65eb4ab 100644
+index 8baf5c3..90259e0 100644
 --- a/iokit/Kernel/arm/LavenderGPU.cpp
 +++ b/iokit/Kernel/arm/LavenderGPU.cpp
 @@ -27,6 +27,7 @@
@@ -10,7 +10,15 @@ index 8baf5c3..65eb4ab 100644
  #include <mach/vm_param.h>
  #include <sys/systm.h>
  
-@@ -149,6 +150,26 @@ LavenderGPU::start(IOService * provider)
+@@ -88,6 +89,7 @@ lavPoolInit(void)
+ 	static const uint64_t sizes[] = { 128ull << 20, 64ull << 20, 32ull << 20, 16ull << 20, 8ull << 20, 4ull << 20 };
+ 
+ 	for (unsigned i = 0; i < sizeof(sizes) / sizeof(sizes[0]) && gPool == NULL; i++) {
++		printf("LavenderGPU: pool of %llu MB: trying\n", sizes[i] >> 20);
+ 		IOBufferMemoryDescriptor * m = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,
+ 		    kIODirectionInOut | kIOMemoryPhysicallyContiguous | kIOMapWriteCombineCache, sizes[i], 0x00000000FFFFF000ULL);
+ 
+@@ -149,6 +151,28 @@ LavenderGPU::start(IOService * provider)
  	return true;
  }
  
@@ -26,18 +34,20 @@ index 8baf5c3..65eb4ab 100644
 +	if (!PE_parse_boot_argn("lavgpu", &v, sizeof(v)) || v == 0) {
 +		return;
 +	}
++	printf("LavenderGPU: early pool: start\n");
 +	if (gLavLock == NULL) {
 +		gLavLock = IOLockAlloc();
 +	}
 +	if (gPool == NULL) {
 +		lavPoolInit();
 +	}
++	printf("LavenderGPU: early pool: done, pool %s\n", gPool != NULL ? "ok" : "none");
 +}
 +
  void
  LavenderGPUStart(void)
  {
-@@ -274,6 +295,7 @@ LavenderGPUUserClient::clientMemoryForType(UInt32 type, IOOptionBits * options,
+@@ -274,6 +298,7 @@ LavenderGPUUserClient::clientMemoryForType(UInt32 type, IOOptionBits * options,
  		fMemory[type - 1]->retain();
  		*memory = fMemory[type - 1];
  		*options = fPoolN[type - 1] != 0 ? kIOMapWriteCombineCache : 0;
