@@ -1097,9 +1097,9 @@ wlan_qrtr_send(uint32_t type, uint32_t src_port, uint32_t dst_node,
 
 struct tftp_sess {
 	boolean_t used, last, write, wr_src;
-	boolean_t has_wsize, has_timeout, has_tsize;
+	boolean_t has_wsize, has_timeout, has_tsize, has_rsize, has_seek;
 	uint32_t node, port, rport, size, blk, sent, wlen;
-	uint32_t wsize, timeout;
+	uint32_t wsize, timeout, rsize, seek;
 	char name[13];
 	char path[64];
 };
@@ -1162,6 +1162,26 @@ wlan_tftp_data(struct tftp_sess *s, uint32_t block)
 	wlan_tftp_reply(s, 4 + n);
 }
 
+/* Send up to wsize DATA blocks without waiting for each ACK. */
+static void
+wlan_tftp_window(struct tftp_sess *s, uint32_t from)
+{
+	uint32_t n = s->has_wsize ? s->wsize : 1;
+
+	if (n < 1) {
+		n = 1;
+	}
+	if (n > 16) {
+		n = 16;
+	}
+	for (uint32_t k = 0; k < n; k++) {
+		wlan_tftp_data(s, from + k);
+		if (s->last) {
+			break;
+		}
+	}
+}
+
 /* /readonly/firmware/image/wlanmdsp.mbn -> WLANMDSP.MBN (8.3, uppercase). */
 static boolean_t
 wlan_tftp_fname(const char *path, char *out, size_t max)
@@ -1208,18 +1228,19 @@ wlan_tftp_u32(uint8_t *p, uint32_t *n, uint32_t v)
 static void
 wlan_tftp_oack(struct tftp_sess *s)
 {
-	static const char *keys[4] = { "blksize", "wsize", "timeoutms",
-	    "tsize" };
-	boolean_t use[4] = { TRUE, s->has_wsize, s->has_timeout,
-	    s->has_tsize };
+	static const char *keys[5] = { "blksize", "rsize", "wsize",
+	    "timeoutms", "tsize" };
+	boolean_t use[5] = { TRUE, s->has_rsize, s->has_wsize,
+	    s->has_timeout, s->has_tsize };
 	uint32_t n = 4;
 
 	t_pkt[0] = 0;
 	t_pkt[1] = TFTP_OACK;
-	for (int i = 0; i < 4; i++) {
+	for (int i = 0; i < 5; i++) {
 		const char *k = keys[i];
-		uint32_t v = i == 0 ? s->blk : i == 1 ? s->wsize :
-		    i == 2 ? s->timeout : (s->write ? 0 : s->size);
+		uint32_t v = i == 0 ? s->blk : i == 1 ? s->rsize :
+		    i == 2 ? s->wsize : i == 3 ? s->timeout :
+		    (s->write ? 0 : s->size);
 
 		if (!use[i]) {
 			continue;
@@ -1326,6 +1347,12 @@ wlan_tftp_req(uint32_t node, uint32_t port, const uint8_t *d, uint32_t len)
 			s->has_timeout = TRUE;
 		} else if (strcasecmp(key, "tsize") == 0) {
 			s->has_tsize = TRUE;
+		} else if (strcasecmp(key, "rsize") == 0 && v >= 1) {
+			s->rsize = v;
+			s->has_rsize = TRUE;
+		} else if (strcasecmp(key, "seek") == 0) {
+			s->seek = v;
+			s->has_seek = TRUE;
 		}
 	}
 	if (op == TFTP_WRQ) {
@@ -1385,6 +1412,9 @@ wlan_tftp_req(uint32_t node, uint32_t port, const uint8_t *d, uint32_t len)
 	printf("SWEET WLAN: tftp RRQ %s (%u bytes, blk %u%s) port %x\n",
 	    s->name, s->size, s->blk, opts ? ", oack" : "", s->port);
 	if (opts) {
+		printf("SWEET WLAN: tftp opts blk %u rsize %u wsize %u tmo "
+		    "%u tsize %u seek %u\n", s->blk, s->rsize, s->wsize,
+		    s->timeout, s->has_tsize, s->seek);
 		wlan_tftp_oack(s);
 	} else {
 		wlan_tftp_data(s, 1);
@@ -1410,17 +1440,20 @@ wlan_tftp_sess_rx(uint32_t port, const uint8_t *d, uint32_t len)
 	block = (uint16_t)((d[2] << 8) | d[3]);
 	switch (op) {
 	case TFTP_ACK:
+		if (s->write) {
+			break;
+		}
 		if (block == 0) {
-			wlan_tftp_data(s, 1);
-		} else if (block + 1 == s->sent) {
-			wlan_tftp_data(s, s->sent);     /* repeat a lost DATA */
+			wlan_tftp_window(s, 1);
+		} else if (block < s->sent) {
+			wlan_tftp_window(s, block + 1); /* cumulative ACK */
 		} else if (block == s->sent) {
 			if (s->last) {
 				printf("SWEET WLAN: tftp %s done (%u bytes)\n",
 				    s->name, s->size);
 				s->used = FALSE;
 			} else {
-				wlan_tftp_data(s, s->sent + 1);
+				wlan_tftp_window(s, s->sent + 1);
 			}
 		}
 		break;
