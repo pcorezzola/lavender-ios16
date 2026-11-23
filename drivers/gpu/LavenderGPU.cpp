@@ -248,9 +248,6 @@ LavenderGPUUserClient::clientClose(void)
 	IOLockLock(gLavLock);
 	for (uint32_t i = 0; i < LAV_BUFFERS; i++) {
 		if (fMemory[i] != NULL) {
-			if (fPoolN[i] != 0) {
-				fMemory[i]->complete();
-			}
 			fMemory[i]->release();
 			fMemory[i] = NULL;
 			if (fPoolN[i] != 0) {
@@ -302,16 +299,9 @@ LavenderGPUUserClient::bufferNew(struct lav_buf_new * request)
 		IOLockUnlock(gLavLock);
 		if (first >= 0) {
 			at = (uint32_t)first;
-			memory = IOMemoryDescriptor::withAddressRange(gPoolPhys + (uint64_t)at * LAV_POOL_PAGE, size,
-			    kIODirectionInOut | kIOMemoryTypePhysical64, NULL);
+			/* a piece of the pool's own (wired) descriptor: a physical-range descriptor made here panics when mapped or DMA'd */
+			memory = IOSubMemoryDescriptor::withSubRange(gPool, (uint64_t)at * LAV_POOL_PAGE, size, kIODirectionInOut);
 			if (memory == NULL) {
-				IOLockLock(gLavLock);
-				bzero(gPoolUsed + at, npages);
-				IOLockUnlock(gLavLock);
-			} else if (memory->prepare() != kIOReturnSuccess) {
-				/* a physical-range descriptor is not wired until prepare(): mapping or DMA on it panics otherwise */
-				memory->release();
-				memory = NULL;
 				IOLockLock(gLavLock);
 				bzero(gPoolUsed + at, npages);
 				IOLockUnlock(gLavLock);
@@ -344,9 +334,6 @@ LavenderGPUUserClient::bufferNew(struct lav_buf_new * request)
 			bzero(gPoolUsed + at, npages);
 		}
 		IOLockUnlock(gLavLock);
-		if (npages != 0) {
-			memory->complete();
-		}
 		memory->release();
 		return kIOReturnNoResources;
 	}
@@ -369,9 +356,6 @@ LavenderGPUUserClient::bufferFree(uint32_t handle)
 
 	IOLockLock(gLavLock);
 	if (handle >= 1 && handle <= LAV_BUFFERS && fMemory[handle - 1] != NULL) {
-		if (fPoolN[handle - 1] != 0) {
-			fMemory[handle - 1]->complete();
-		}
 		fMemory[handle - 1]->release();
 		fMemory[handle - 1] = NULL;
 		if (fPoolN[handle - 1] != 0) {
