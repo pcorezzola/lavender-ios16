@@ -2305,6 +2305,14 @@ glink_rx_one(void)
 				printf("SWEET AUDIO: APR basic rsp opcode "
 				    "%08x status %u\n", audio_le32(p),
 				    audio_le32(p + 4));
+				printf("SWEET AUDIO: APR raw len %u pkt %u "
+				    "hdr %04x chunk %u:", len, a->pkt_size,
+				    a->hdr_field, h.chunk);
+				for (uint32_t bi = 0; bi < len && bi < 48;
+				    bi++) {
+					printf(" %02x", buf[bi]);
+				}
+				printf("\n");
 			}
 		} else {
 			printf("SWEET AUDIO: glink rx data len %u (no APR)\n",
