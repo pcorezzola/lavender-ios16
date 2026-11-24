@@ -2334,11 +2334,6 @@ glink_rx_one(void)
 						adm_status = audio_le32(p);
 						adm_copp = audio_le32(p + 4) &
 						    0xffffu;
-						if (adm_copp == 0) {
-							adm_copp =
-							    (audio_le32(p + 4) >>
-							    16) & 0xffffu;
-						}
 						printf("SWEET AUDIO: ADM "
 						    "status %u copp %x\n",
 						    adm_status, adm_copp);
