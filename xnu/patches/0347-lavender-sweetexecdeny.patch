@@ -1,0 +1,102 @@
+From: port_ios lavender
+Subject: [PATCH 0347] lavender: sweetexecdeny boot arg refuses exec of listed services
+
+The phone has no launchctl and its ssh dies while lskdd, fairplayd.H2 and vmd
+respawn in loops (CPU/IO starvation, "Connection timed out during banner
+exchange"). sweetexecdeny=lskdd,fairplayd.H2,vmd makes execve() and
+posix_spawn() (launchd uses the latter) fail with EPERM when the basename of
+the executable matches, and logs "SWEET EXEC: refusing <name>". Services can
+be re-enabled one by one by dropping them from the list. Default off.
+
+diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -3339,10 +3339,60 @@
+ 		error = setuid(p, &args, NULL);
+ 		if (error) {
+ 			return error;
++		}
++	}
++	return 0;
++}
++
++#if defined(ARM64_BOARD_CONFIG_LAVENDER)
++/*
++ * 0347: sweetexecdeny=name1,name2,... makes execve()/posix_spawn() fail with
++ * EPERM when the basename of the executable path is in the list. The phone's
++ * userland (toybox + dropbear) has no launchctl, and respawn loops of
++ * lskdd / fairplayd.H2 / vmd starve sshd, so this stops them from the boot
++ * args alone. Off unless the boot arg is present.
++ */
++static int
++sweet_exec_denied(user_addr_t fname)
++{
++	static char list[128];
++	static int state = -1;
++	char path[128];
++	const char *base, *p;
++	size_t blen;
++
++	if (state < 0) {
++		list[0] = 0;
++		state = PE_parse_boot_argn("sweetexecdeny", list, sizeof(list)) ? 1 : 0;
++	}
++	if (!state || copyinstr(fname, path, sizeof(path), NULL) != 0) {
++		return 0;
++	}
++	base = path;
++	for (p = path; *p; p++) {
++		if (*p == '/') {
++			base = p + 1;
+ 		}
+ 	}
++	blen = strlen(base);
++	if (blen == 0) {
++		return 0;
++	}
++	for (p = list; *p;) {
++		const char *e = p;
++		while (*e && *e != ',') {
++			e++;
++		}
++		if ((size_t)(e - p) == blen && strncmp(p, base, blen) == 0) {
++			printf("SWEET EXEC: refusing %s (sweetexecdeny)
++", base);
++			return 1;
++		}
++		p = *e ? e + 1 : e;
++	}
+ 	return 0;
+ }
++#endif /* ARM64_BOARD_CONFIG_LAVENDER */
+ 
+ /*
+  * posix_spawn
+@@ -3448,6 +3498,13 @@
+ 	imgp->ip_inherited_jop_pid = 0;
+ 	uthread_set_exec_data(current_uthread(), imgp);
+ 
++#if defined(ARM64_BOARD_CONFIG_LAVENDER)
++	if (sweet_exec_denied(uap->path)) {
++		error = EPERM;
++		goto bad;
++	}
++#endif /* ARM64_BOARD_CONFIG_LAVENDER */
++
+ 	if (uap->adesc != USER_ADDR_NULL) {
+ 		if (is_64) {
+ 			error = copyin(uap->adesc, &px_args, sizeof(px_args));
+@@ -5009,6 +5066,13 @@
+ 	}
+ #endif /* ARM64_BOARD_CONFIG_LAVENDER */
+ 
++#if defined(ARM64_BOARD_CONFIG_LAVENDER)
++	if (sweet_exec_denied(uap->fname)) {
++		error = EPERM;
++		goto exit_with_error;
++	}
++#endif /* ARM64_BOARD_CONFIG_LAVENDER */
++
+ #if CONFIG_MACF
+ 	if (uap->mac_p != USER_ADDR_NULL) {
+ 		error = mac_execve_enter(uap->mac_p, imgp);
