@@ -11,7 +11,7 @@ ok
 diff --git a/bsd/dev/santoni_sdhci.c b/bsd/dev/santoni_sdhci.c
 --- a/bsd/dev/santoni_sdhci.c
 +++ b/bsd/dev/santoni_sdhci.c
-@@ -4579,6 +4579,86 @@
+@@ -4579,6 +4579,87 @@
  }
  
  /*
@@ -88,7 +88,8 @@ diff --git a/bsd/dev/santoni_sdhci.c b/bsd/dev/santoni_sdhci.c
 +	delay(75);
 +	p[0] = 7;
 +	delay(100);
-+	*cf = cfg;
++	/* 0353 probe: source 3 (and 5) is the PLL (1112 MHz at L = 0x3a); source 4, left by ABL, is a 600 MHz GPLL0. */
++	*cf = (cfg & ~(7u << 8)) | (3u << 8);
 +	(void)sweet_cpul_rcg_update(cmd);
 +	printf("SWEET CPUL: %s, mode 0x%08x L 0x%x rcg cfg 0x%08x cmd 0x%08x\n",
 +	    "done", p[0], p[1], *cf, *cmd);
@@ -98,7 +99,7 @@ diff --git a/bsd/dev/santoni_sdhci.c b/bsd/dev/santoni_sdhci.c
   * 0179: sdhci_read_pio()/sdhci_write_pio() already leave the controller
   * recovered before they return an error - sdhci_recover() resets the
   * command/data paths and, if an inhibit bit is still stuck, cycles the card
-@@ -5592,6 +5672,7 @@
+@@ -5592,6 +5673,7 @@
  	if (!error) {
  		sdhci_speedup();        /* 0349: optional, never fails the probe */
  		sweet_osm_dump();       /* 0351: boot-arg sweetosm=1 */
