@@ -11,7 +11,7 @@ be re-enabled one by one by dropping them from the list. Default off.
 diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
 --- a/bsd/kern/kern_exec.c
 +++ b/bsd/kern/kern_exec.c
-@@ -3339,10 +3339,60 @@
+@@ -3339,10 +3339,59 @@
  		error = setuid(p, &args, NULL);
  		if (error) {
  			return error;
@@ -60,8 +60,7 @@ diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
 +			e++;
 +		}
 +		if ((size_t)(e - p) == blen && strncmp(p, base, blen) == 0) {
-+			printf("SWEET EXEC: refusing %s (sweetexecdeny)
-+", base);
++			printf("SWEET EXEC: refusing %s (sweetexecdeny)\n", base);
 +			return 1;
 +		}
 +		p = *e ? e + 1 : e;
@@ -72,7 +71,7 @@ diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
  
  /*
   * posix_spawn
-@@ -3448,6 +3498,13 @@
+@@ -3448,6 +3497,13 @@
  	imgp->ip_inherited_jop_pid = 0;
  	uthread_set_exec_data(current_uthread(), imgp);
  
@@ -86,7 +85,7 @@ diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
  	if (uap->adesc != USER_ADDR_NULL) {
  		if (is_64) {
  			error = copyin(uap->adesc, &px_args, sizeof(px_args));
-@@ -5009,6 +5066,13 @@
+@@ -5009,6 +5065,13 @@
  	}
  #endif /* ARM64_BOARD_CONFIG_LAVENDER */
  
