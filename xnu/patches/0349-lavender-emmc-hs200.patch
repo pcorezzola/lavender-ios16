@@ -1,5 +1,5 @@
 From: port_ios lavender
-Subject: [PATCH 0349] lavender: eMMC real 25/50 MHz and HS200 192 MHz (boot-arg sweetemmc_mode)
+Subject: [PATCH 0349] lavender: eMMC real 25/50 MHz, HS200 and HS400 (boot-arg sweetemmc_mode 1..4)
 
 The "25 MHz" GCC row was copied from msm8937 (GPLL0 800 MHz). On the SDM660 GCC
 GPLL0 is 600 MHz, so the card really ran at 18.75 MHz, which is why ADMA2 tops
@@ -55,7 +55,7 @@ diff --git a/bsd/dev/santoni_sdhci.c b/bsd/dev/santoni_sdhci.c
  
  	cfg &= ~(GCC_CFG_DIV_MASK | GCC_CFG_SEL_MASK | GCC_CFG_MODE_MASK);
  	cfg |= r->cfg;
-@@ -3931,6 +3950,436 @@
+@@ -3931,9 +3950,581 @@
  		}
  	}
  	return EIO;
@@ -79,6 +79,7 @@ diff --git a/bsd/dev/santoni_sdhci.c b/bsd/dev/santoni_sdhci.c
 +#define SPEEDUP_CHUNK_BLOCKS    16u
 +
 +static uint8_t speedup_ref[SDHCI_BLOCK];
++static int speedup_phase = -1;
 +static uint64_t speedup_hash[SPEEDUP_NCHUNK];
 +static const uint32_t speedup_lba[SPEEDUP_NCHUNK] = { 0, 2048, 262144, 4194304 };
 +
@@ -128,6 +129,7 @@ diff --git a/bsd/dev/santoni_sdhci.c b/bsd/dev/santoni_sdhci.c
 +	dma_sync(SDHCI_BLOCK, TRUE);
 +	memcpy(cur, (const void *)(se.dma + DMA_BOUNCE), SDHCI_BLOCK);
 +	cur[EXT_CSD_HS_TIMING] = speedup_ref[EXT_CSD_HS_TIMING];
++	cur[EXT_CSD_BUS_WIDTH] = speedup_ref[EXT_CSD_BUS_WIDTH];
 +	return memcmp(cur + 128, speedup_ref + 128, SDHCI_BLOCK - 128) ? EIO : 0;
 +}
 +
@@ -339,8 +341,8 @@ diff --git a/bsd/dev/santoni_sdhci.c b/bsd/dev/santoni_sdhci.c
 +		}
 +	}
 +	return best;
-+}
-+
+ }
+ 
 +/* Leave HS200: DLL off, feedback clock, 50 MHz, card back to High Speed. */
 +static void
 +speedup_hs200_restore(void)
@@ -420,6 +422,9 @@ diff --git a/bsd/dev/santoni_sdhci.c b/bsd/dev/santoni_sdhci.c
 +	if (!error) {
 +		error = speedup_check("HS200 192 MHz");
 +	}
++	if (!error) {
++		speedup_phase = phase;
++	}
 +	if (error) {
 +		goto out_restore;
 +	}
@@ -443,6 +448,140 @@ diff --git a/bsd/dev/santoni_sdhci.c b/bsd/dev/santoni_sdhci.c
 +out_hs:
 +	/* The switch itself failed: the card is still (or again) in High Speed. */
 +	printf("WHYRED SDHCI: speedup: HS200 switch failed (%d), staying in High Speed\n", error);
++	return error;
++}
++
+ /*
++ * HS400 (mode 4), after a verified HS200: card HS200 -> HS (50 MHz) -> 8-bit
++ * DDR -> HS400, host UHS mode 5 with HC_SELECT_IN = 4 (what ABL left), the
++ * CM DLL re-initialised at 192 MHz with the HS200 phase and the SDC4 DDR
++ * calibration of sdhci-msm. On any failure the card is brought back to 8-bit
++ * SDR High Speed at 50 MHz and verified.
++ */
++#define CORE_DDR_CAL_EN         0x00000001u     /* DLL_CONFIG_2 BIT(0) */
++#define CORE_DDR_DLL_LOCK       0x00000800u     /* DLL_STATUS BIT(11) */
++#define SDHCI_CTRL_UHS_HS400    0x0005u
++#define EXT_CSD_TIMING_HS400    3u
++#define EXT_CSD_BUS_W_DDR8      6u
++#define EXT_CSD_BUS_W_SDR8      2u
++
++static int
++speedup_hs400_restore(void)
++{
++	uint16_t hc2 = hc_rd16(SDHCI_HOST_CONTROL2);
++	uint32_t c = hc_rd(CORE_DLL_CONFIG);
++	uint32_t vs = hc_rd(CORE_VENDOR_SPEC);
++	int error;
++
++	hc_wr16(SDHCI_CLOCK_CONTROL, 0);
++	hc_wr16(SDHCI_HOST_CONTROL2, (uint16_t)(hc2 & ~(SDHCI_CTRL_UHS_MASK |
++	    SDHCI_CTRL_EXEC_TUNING | SDHCI_CTRL_TUNED_CLK)));
++	hc_wr(CORE_DLL_CONFIG, (c | CORE_DLL_RST | CORE_DLL_PDN) &
++	    ~(CORE_CK_OUT_EN | CORE_CDR_EXT_EN | CORE_DLL_EN));
++	hc_wr(CORE_VENDOR_SPEC, (vs & ~(CORE_HC_SELECT_IN_EN | CORE_HC_SELECT_IN_MASK)));
++	error = sdhci_gcc_set_apps(&santoni_gcc_rates[SANTONI_GCC_RATE_50M]);
++	if (!error) {
++		error = sdhci_switch_ext_csd(EXT_CSD_HS_TIMING, 1, SDHCI_CTRL_HISPD,
++		    0, "HS_TIMING=1 (leaving HS400)");
++	}
++	if (!error) {
++		error = sdhci_switch_ext_csd(EXT_CSD_BUS_WIDTH, EXT_CSD_BUS_W_SDR8,
++		    SDHCI_CTRL_8BITBUS, SDHCI_CTRL_BUS_MASK, "BUS_WIDTH=8 SDR");
++	}
++	if (!error) {
++		error = speedup_check("back in High Speed at 50 MHz");
++	}
++	printf("WHYRED SDHCI: speedup: HS400 left, High Speed 50 MHz %s (%d)\n",
++	    error ? "NOT verified" : "verified", error);
++	return error;
++}
++
++static int
++speedup_hs400(void)
++{
++	uint32_t c, vs;
++	int error;
++
++	if (speedup_phase < 0) {
++		return EINVAL;
++	}
++	speedup_dll_regs("HS400 start");
++	/* HS200 -> HS at 50 MHz, DLL off, feedback clock. */
++	{
++		uint16_t hc2 = hc_rd16(SDHCI_HOST_CONTROL2);
++
++		c = hc_rd(CORE_DLL_CONFIG);
++		hc_wr16(SDHCI_CLOCK_CONTROL, 0);
++		hc_wr16(SDHCI_HOST_CONTROL2, (uint16_t)(hc2 & ~(SDHCI_CTRL_UHS_MASK |
++		    SDHCI_CTRL_EXEC_TUNING | SDHCI_CTRL_TUNED_CLK)));
++		hc_wr(CORE_DLL_CONFIG, (c | CORE_DLL_RST | CORE_DLL_PDN) &
++		    ~(CORE_CK_OUT_EN | CORE_CDR_EXT_EN | CORE_DLL_EN));
++	}
++	error = sdhci_gcc_set_apps(&santoni_gcc_rates[SANTONI_GCC_RATE_50M]);
++	if (!error) {
++		error = sdhci_switch_ext_csd(EXT_CSD_HS_TIMING, 1, SDHCI_CTRL_HISPD,
++		    0, "HS_TIMING=1 (HS200 to HS)");
++	}
++	if (!error) {
++		error = speedup_check("HS 50 MHz before DDR");
++	}
++	if (error) {
++		goto fail;
++	}
++	error = sdhci_switch_ext_csd(EXT_CSD_BUS_WIDTH, EXT_CSD_BUS_W_DDR8,
++	    SDHCI_CTRL_8BITBUS, SDHCI_CTRL_BUS_MASK, "BUS_WIDTH=8 DDR");
++	if (error) {
++		goto fail;
++	}
++	error = sdhci_switch_ext_csd(EXT_CSD_HS_TIMING, EXT_CSD_TIMING_HS400,
++	    SDHCI_CTRL_HISPD, 0, "HS_TIMING=3 (HS400)");
++	if (error) {
++		goto fail;
++	}
++	/* Host side: HS400 select, 192 MHz, DLL at the tuned phase, DDR calibration. */
++	vs = hc_rd(CORE_VENDOR_SPEC);
++	vs &= ~(CORE_HC_SELECT_IN_MASK);
++	vs |= CORE_HC_SELECT_IN_EN | (4u << 19);
++	hc_wr(CORE_VENDOR_SPEC, vs);
++	error = sdhci_gcc_set_apps(&santoni_gcc_rates[SANTONI_GCC_RATE_192M]);
++	if (error) {
++		goto fail;
++	}
++	hc_wr16(SDHCI_HOST_CONTROL2, (uint16_t)((hc_rd16(SDHCI_HOST_CONTROL2) &
++	    ~SDHCI_CTRL_UHS_MASK) | SDHCI_CTRL_UHS_HS400));
++	error = speedup_dll_init(0);
++	if (!error) {
++		error = speedup_dll_phase((unsigned)speedup_phase);
++	}
++	if (error) {
++		goto fail;
++	}
++	hc_wr(CORE_VENDOR_SPEC3, hc_rd(CORE_VENDOR_SPEC3) | CORE_PWRSAVE_DLL);
++	hc_wr(CORE_DDR_CONFIG, 0x80040873u);
++	hc_wr(CORE_DLL_CONFIG_2, hc_rd(CORE_DLL_CONFIG_2) | CORE_DDR_CAL_EN);
++	for (int i = 0; ; i++) {
++		if (hc_rd(CORE_DLL_STATUS) & CORE_DDR_DLL_LOCK) {
++			printf("WHYRED SDHCI: speedup: HS400 DDR DLL locked after %d us\n", i);
++			break;
++		}
++		if (i >= 1000) {
++			printf("WHYRED SDHCI: speedup: HS400 DDR DLL did not lock\n");
++			speedup_dll_regs("HS400 no DDR lock");
++			error = ETIMEDOUT;
++			goto fail;
++		}
++		delay(1);
++	}
++	speedup_dll_regs("HS400 calibrated");
++	error = speedup_check("HS400 192 MHz DDR");
++	if (error) {
++		goto fail;
++	}
++	printf("WHYRED SDHCI: speedup: HS400 192 MHz DDR active\n");
++	return 0;
++fail:
++	printf("WHYRED SDHCI: speedup: HS400 failed (%d)\n", error);
++	(void)speedup_hs400_restore();
 +	return error;
 +}
 +
@@ -487,12 +626,18 @@ diff --git a/bsd/dev/santoni_sdhci.c b/bsd/dev/santoni_sdhci.c
 +		last = SANTONI_GCC_RATE_50M;
 +	}
 +	if (mode >= 3) {
-+		(void)speedup_hs200();
++		error = speedup_hs200();
++		if (!error && mode >= 4) {
++			(void)speedup_hs400();
++		}
 +	}
- }
- 
- /*
-@@ -4944,6 +5393,9 @@
++}
++
++/*
+  * 0179: sdhci_read_pio()/sdhci_write_pio() already leave the controller
+  * recovered before they return an error - sdhci_recover() resets the
+  * command/data paths and, if an inhibit bit is still stuck, cycles the card
+@@ -4944,6 +5535,9 @@
  		error = sdhci_verify_highspeed_bus(se.sec_count);
  	}
  	if (!error) {
