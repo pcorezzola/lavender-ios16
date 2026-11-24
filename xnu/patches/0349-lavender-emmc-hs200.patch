@@ -10,7 +10,6 @@ sdhci-msm msm_init_cm_dll, 16-phase CMD21 tuning against a reference block read
 at 50 MHz, middle of the longest good window). Each stage is checked against the
 EXT_CSD and four data chunks read at the previous speed and rolled back on any
 mismatch. Default (no boot-arg) is unchanged.
-
 diff --git a/bsd/dev/santoni_sdhci.c b/bsd/dev/santoni_sdhci.c
 --- a/bsd/dev/santoni_sdhci.c
 +++ b/bsd/dev/santoni_sdhci.c
@@ -56,7 +55,7 @@ diff --git a/bsd/dev/santoni_sdhci.c b/bsd/dev/santoni_sdhci.c
  
  	cfg &= ~(GCC_CFG_DIV_MASK | GCC_CFG_SEL_MASK | GCC_CFG_MODE_MASK);
  	cfg |= r->cfg;
-@@ -3931,6 +3950,388 @@
+@@ -3931,6 +3950,436 @@
  		}
  	}
  	return EIO;
@@ -231,40 +230,84 @@ diff --git a/bsd/dev/santoni_sdhci.c b/bsd/dev/santoni_sdhci.c
 +	return ETIMEDOUT;
 +}
 +
-+/* msm_init_cm_dll() for an SDCC v5 CM DLL, MCLK_FREQ 7 (<= 200 MHz). */
-+static int
-+speedup_dll_init(void)
-+{
-+	uint32_t c;
++/*
++ * msm_init_cm_dll() for an SDCC v5 CM DLL, MCLK_FREQ 7 (<= 200 MHz).
++ * variant 0: plain flow plus the v5 "enable DLL lock status" bit in
++ * DLL_USR_CTL (without it DLL_STATUS reads 0: the first 0354 try).
++ * variant 1: the "14lpp" flow of sdhci-msm (CK_OUT_EN off and DLL clock
++ * disabled around the reset, MCLK count programmed into DLL_CONFIG_2).
++ */
++#define CORE_DLL_CONFIG_2       0x254
++#define CORE_DLL_CONFIG_3       0x258
++#define CORE_DDR_CONFIG         0x25c
++#define CORE_DLL_USR_CTL        0x388
++#define CORE_DLL_CLOCK_DISABLE  0x00200000u     /* DLL_CONFIG_2 BIT(21) */
++#define CORE_FLL_CYCLE_CNT      0x00040000u     /* DLL_CONFIG_2 BIT(18) */
++#define CORE_ENABLE_DLL_LOCK_STATUS 0x00200000u /* DLL_USR_CTL BIT(21) */
 +
++static void
++speedup_dll_regs(const char *when)
++{
++	printf("WHYRED SDHCI: speedup: %s: DLL_CONFIG 0x%08x STATUS 0x%08x "
++	    "CONFIG_2 0x%08x CONFIG_3 0x%08x USR_CTL 0x%08x DDR_CONFIG 0x%08x "
++	    "VENDOR_SPEC 0x%08x VS3 0x%08x\n", when, hc_rd(CORE_DLL_CONFIG),
++	    hc_rd(CORE_DLL_STATUS), hc_rd(CORE_DLL_CONFIG_2),
++	    hc_rd(CORE_DLL_CONFIG_3), hc_rd(CORE_DLL_USR_CTL),
++	    hc_rd(CORE_DDR_CONFIG), hc_rd(CORE_VENDOR_SPEC),
++	    hc_rd(CORE_VENDOR_SPEC3));
++}
++
++static int
++speedup_dll_init(int variant)
++{
++	uint32_t c, c2;
++
++	speedup_dll_regs("DLL before init");
 +	hc_wr(CORE_VENDOR_SPEC, hc_rd(CORE_VENDOR_SPEC) & ~CORE_CLK_PWRSAVE);
 +	hc_wr(CORE_VENDOR_SPEC3, hc_rd(CORE_VENDOR_SPEC3) & ~CORE_PWRSAVE_DLL);
 +	c = hc_rd(CORE_DLL_CONFIG);
++	if (variant == 1) {
++		c &= ~CORE_CK_OUT_EN;
++		hc_wr(CORE_DLL_CONFIG, c);
++		hc_wr(CORE_DLL_CONFIG_2,
++		    hc_rd(CORE_DLL_CONFIG_2) | CORE_DLL_CLOCK_DISABLE);
++	}
 +	c |= CORE_DLL_RST;
 +	hc_wr(CORE_DLL_CONFIG, c);
 +	c |= CORE_DLL_PDN;
 +	hc_wr(CORE_DLL_CONFIG, c);
 +	c = (c & ~CORE_MCLK_FREQ_MASK) | (7u << 24);
 +	hc_wr(CORE_DLL_CONFIG, c);
++	if (variant == 1) {
++		uint32_t mclk;
++
++		c2 = hc_rd(CORE_DLL_CONFIG_2);
++		mclk = (c2 & CORE_FLL_CYCLE_CNT) ? 80u : 40u;   /* 192 MHz * 8|4 / 19.2 MHz */
++		c2 = (c2 & ~(0xffu << 10)) | (mclk << 10);
++		hc_wr(CORE_DLL_CONFIG_2, c2);
++		delay(5);
++	}
 +	c &= ~CORE_DLL_RST;
 +	hc_wr(CORE_DLL_CONFIG, c);
 +	c &= ~CORE_DLL_PDN;
 +	hc_wr(CORE_DLL_CONFIG, c);
++	hc_wr(CORE_DLL_CONFIG_2, hc_rd(CORE_DLL_CONFIG_2) & ~CORE_DLL_CLOCK_DISABLE);
++	hc_wr(CORE_DLL_USR_CTL, hc_rd(CORE_DLL_USR_CTL) | CORE_ENABLE_DLL_LOCK_STATUS);
 +	c |= CORE_DLL_EN;
 +	hc_wr(CORE_DLL_CONFIG, c);
 +	c |= CORE_CK_OUT_EN;
 +	hc_wr(CORE_DLL_CONFIG, c);
 +	for (int i = 0; i < 1000; i++) {
 +		if (hc_rd(CORE_DLL_STATUS) & CORE_DLL_LOCK) {
-+			printf("WHYRED SDHCI: speedup: DLL locked after %d us "
-+			    "(DLL_CONFIG 0x%08x STATUS 0x%08x)\n", i,
-+			    hc_rd(CORE_DLL_CONFIG), hc_rd(CORE_DLL_STATUS));
++			printf("WHYRED SDHCI: speedup: DLL variant %d locked after "
++			    "%d us\n", variant, i);
++			speedup_dll_regs("DLL locked");
 +			return 0;
 +		}
 +		delay(1);
 +	}
-+	printf("WHYRED SDHCI: speedup: DLL did not lock (DLL_CONFIG 0x%08x "
-+	    "STATUS 0x%08x)\n", hc_rd(CORE_DLL_CONFIG), hc_rd(CORE_DLL_STATUS));
++	printf("WHYRED SDHCI: speedup: DLL variant %d did not lock\n", variant);
++	speedup_dll_regs("DLL not locked");
 +	return ETIMEDOUT;
 +}
 +
@@ -350,7 +393,10 @@ diff --git a/bsd/dev/santoni_sdhci.c b/bsd/dev/santoni_sdhci.c
 +	}
 +	hc_wr16(SDHCI_HOST_CONTROL2, (uint16_t)((hc_rd16(SDHCI_HOST_CONTROL2) &
 +	    ~SDHCI_CTRL_UHS_MASK) | 3u));
-+	error = speedup_dll_init();
++	error = speedup_dll_init(0);
++	if (error) {
++		error = speedup_dll_init(1);
++	}
 +	if (error) {
 +		goto out_restore;
 +	}
@@ -422,6 +468,7 @@ diff --git a/bsd/dev/santoni_sdhci.c b/bsd/dev/santoni_sdhci.c
 +		return;
 +	}
 +	printf("WHYRED SDHCI: speedup: mode %u requested\n", mode);
++	speedup_dll_regs("handoff");
 +
 +	if (mode >= 1) {
 +		error = speedup_rate(SANTONI_GCC_RATE_25M_REAL, "25 MHz real");
@@ -445,7 +492,7 @@ diff --git a/bsd/dev/santoni_sdhci.c b/bsd/dev/santoni_sdhci.c
  }
  
  /*
-@@ -4944,6 +5345,9 @@
+@@ -4944,6 +5393,9 @@
  		error = sdhci_verify_highspeed_bus(se.sec_count);
  	}
  	if (!error) {
