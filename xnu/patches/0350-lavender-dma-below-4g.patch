@@ -1,0 +1,57 @@
+From: port_ios lavender
+Subject: [PATCH 0350] lavender: keep eMMC/USB/GPU DMA buffers below 4 GB (kernel RAM above 4 GB)
+
+The ADT can now describe up to ~3.4 GiB of kernel RAM (tools/mkadt.py
+SWEET_MEM_SIZE), which crosses the 4 GB line. The eMMC ADMA2 bounce buffer and
+table (32-bit descriptors), the USB DMA area and the GPU contiguous pools must
+stay below 4 GB, so their kmem_alloc_contig() calls now pass max_pnum for
+0xffffffff (IOBufferMemoryDescriptor users already use a 0xfffff000 mask).
+
+diff --git a/bsd/dev/santoni_sdhci.c b/bsd/dev/santoni_sdhci.c
+--- a/bsd/dev/santoni_sdhci.c
++++ b/bsd/dev/santoni_sdhci.c
+@@ -5497,7 +5497,8 @@
+ 		printf("WHYRED SDHCI: no mapping for GCC sdcc1_apps\n");
+ 		return ENXIO;
+ 	}
+-	if (kmem_alloc_contig(kernel_map, &se.dma, BOUNCE_SIZE, PAGE_MASK, 0, 0,
++	if (kmem_alloc_contig(kernel_map, &se.dma, BOUNCE_SIZE, PAGE_MASK,
++	    (ppnum_t)((0x100000000ull >> PAGE_SHIFT) - 1), 0,
+ 	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) !=
+ 	    KERN_SUCCESS) {
+ 		printf("WHYRED SDHCI: no contiguous bounce buffer\n");
+@@ -5514,7 +5515,7 @@
+ 		(void)PE_parse_boot_argn("sweetemmc_dma", &want, sizeof(want));
+ 		if (want &&
+ 		    kmem_alloc_contig(kernel_map, &se.adma, ADMA_TABLE_BYTES,
+-		    PAGE_MASK, 0, 0, KMA_DATA | KMA_ZERO | KMA_PERMANENT,
++		    PAGE_MASK, (ppnum_t)((0x100000000ull >> PAGE_SHIFT) - 1), 0, KMA_DATA | KMA_ZERO | KMA_PERMANENT,
+ 		    VM_KERN_MEMORY_IOKIT) == KERN_SUCCESS) {
+ 			ppnum_t apn = pmap_find_phys(kernel_pmap,
+ 			    (addr64_t)se.adma);
+diff --git a/bsd/dev/sweet_usb.c b/bsd/dev/sweet_usb.c
+--- a/bsd/dev/sweet_usb.c
++++ b/bsd/dev/sweet_usb.c
+@@ -1448,7 +1448,8 @@
+ 	thread_t thread;
+ 
+ 	ud.dwc = dwc;
+-	if (kmem_alloc_contig(kernel_map, &ud.dma, UD_SIZE, PAGE_MASK, 0, 0,
++	if (kmem_alloc_contig(kernel_map, &ud.dma, UD_SIZE, PAGE_MASK,
++	    (ppnum_t)((0x100000000ull >> PAGE_SHIFT) - 1), 0,
+ 	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
+ 		printf("SWEET USB: no DMA memory\n");
+ 		return;
+diff --git a/bsd/dev/lavender_gpu.c b/bsd/dev/lavender_gpu.c
+--- a/bsd/dev/lavender_gpu.c
++++ b/bsd/dev/lavender_gpu.c
+@@ -488,7 +488,8 @@
+ 	ppnum_t pn;
+ 
+ 	*va = 0;
+-	if (kmem_alloc_contig(kernel_map, va, size, mask, 0, 0,
++	if (kmem_alloc_contig(kernel_map, va, size, mask,
++	    (ppnum_t)((0x100000000ull >> PAGE_SHIFT) - 1), 0,
+ 	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) !=
+ 	    KERN_SUCCESS) {
+ 		return ENOMEM;
