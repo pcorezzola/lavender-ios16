@@ -7,16 +7,14 @@ as the lowest OPPs. Park the RCG on XO, reprogram the PLL L, wait lock, switch b
 
 ---
 ok
+ok
 diff --git a/bsd/dev/santoni_sdhci.c b/bsd/dev/santoni_sdhci.c
 --- a/bsd/dev/santoni_sdhci.c
 +++ b/bsd/dev/santoni_sdhci.c
-@@ -4576,6 +4576,101 @@
- 		sweet_osm_dump_range("goldcpr", 0x179c7000ull, 0x1000);
- 	}
- 	printf("SWEET OSM: dump done\n");
-+}
-+
-+/*
+@@ -4579,6 +4579,86 @@
+ }
+ 
+ /*
 + * 0352: raise the Gold (perf) cluster clock (boot-arg sweetcpul=L, PLL ref 19.2 MHz).
 + * ABL leaves L = 0x20 (614.4 MHz); the OSM that normally steps it is not programmed.
 + * TWRP's downstream kernel (CPR corner table of this very chip, read from
@@ -44,7 +42,6 @@ diff --git a/bsd/dev/santoni_sdhci.c b/bsd/dev/santoni_sdhci.c
 +	uint32_t l = 0, oldl, mode, cfg;
 +	vm_offset_t pll, rcg;
 +	volatile uint32_t *p, *cmd, *cf;
-+	int lock = 0;
 +
 +	if (!PE_parse_boot_argn("sweetcpul", &l, sizeof(l)) || l == 0) {
 +		return;
@@ -77,42 +74,31 @@ diff --git a/bsd/dev/santoni_sdhci.c b/bsd/dev/santoni_sdhci.c
 +		printf("SWEET CPUL: RCG update to XO timed out\n");
 +		return;
 +	}
-+	/* PLL: output off, bypass, reset; program L; re-enable */
-+	p[0] = mode & ~1u;
-+	p[0] = mode & ~3u;
-+	p[0] = mode & ~7u;
++	/*
++	 * The downstream clk-cpu-osm bring-up (clk_osm_setup_cluster_pll) writes MODE 0,
++	 * L, then MODE 2, 10 us, MODE 6, 50-75 us, MODE 7 and never polls a lock bit:
++	 * MODE bit 31 does not read back as lock here (it is 0 while the PLL runs).
++	 */
++	p[0] = 0;
 +	p[1] = l;
-+	delay(5);
-+	p[0] = (mode & ~7u) | 2u;
-+	delay(5);
-+	p[0] = (mode & ~7u) | 6u;
-+	for (int i = 0; i < 2000; i++) {
-+		if (p[0] & 0x80000000u) {
-+			lock = 1;
-+			break;
-+		}
-+		delay(1);
-+	}
-+	if (!lock) {
-+		/* back to the old rate */
-+		p[0] = mode & ~7u;
-+		p[1] = oldl;
-+		p[0] = (mode & ~7u) | 2u;
-+		delay(5);
-+		p[0] = (mode & ~7u) | 6u;
-+		for (int i = 0; i < 2000 && !(p[0] & 0x80000000u); i++) {
-+			delay(1);
-+		}
-+	}
-+	p[0] = (p[0] & ~7u) | 7u;
++	(void)p[1];
++	p[0] = 2;
++	delay(10);
++	p[0] = 6;
++	delay(75);
++	p[0] = 7;
++	delay(100);
 +	*cf = cfg;
 +	(void)sweet_cpul_rcg_update(cmd);
 +	printf("SWEET CPUL: %s, mode 0x%08x L 0x%x rcg cfg 0x%08x cmd 0x%08x\n",
-+	    lock ? "locked" : "LOCK FAILED (old L restored)", p[0], p[1], *cf, *cmd);
- }
- 
- /*
-@@ -5592,6 +5687,7 @@
++	    "done", p[0], p[1], *cf, *cmd);
++}
++
++/*
+  * 0179: sdhci_read_pio()/sdhci_write_pio() already leave the controller
+  * recovered before they return an error - sdhci_recover() resets the
+  * command/data paths and, if an inhibit bit is still stuck, cycles the card
+@@ -5592,6 +5672,7 @@
  	if (!error) {
  		sdhci_speedup();        /* 0349: optional, never fails the probe */
  		sweet_osm_dump();       /* 0351: boot-arg sweetosm=1 */
