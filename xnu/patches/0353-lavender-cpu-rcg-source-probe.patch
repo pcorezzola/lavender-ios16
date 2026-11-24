@@ -8,7 +8,7 @@ ok
 diff --git a/bsd/dev/santoni_sdhci.c b/bsd/dev/santoni_sdhci.c
 --- a/bsd/dev/santoni_sdhci.c
 +++ b/bsd/dev/santoni_sdhci.c
-@@ -4656,6 +4656,69 @@
+@@ -4656,6 +4656,72 @@
  	(void)sweet_cpul_rcg_update(cmd);
  	printf("SWEET CPUL: %s, mode 0x%08x L 0x%x rcg cfg 0x%08x cmd 0x%08x\n",
  	    "done", p[0], p[1], *cf, *cmd);
@@ -26,6 +26,9 @@ diff --git a/bsd/dev/santoni_sdhci.c b/bsd/dev/santoni_sdhci.c
 +	uint64_t f, t0, t1, n = 4000000, x = 1;
 +
 +	__asm__ volatile ("mrs %0, cntfrq_el0" : "=r"(f));
++	if (f == 0) {
++		f = 19200000ull;       /* firmware left CNTFRQ unset */
++	}
 +	__asm__ volatile ("isb; mrs %0, cntvct_el0" : "=r"(t0));
 +	for (uint64_t i = 0; i < n; i++) {
 +		__asm__ volatile ("add %0, %0, #1\n add %0, %0, #1\n add %0, %0, #1\n add %0, %0, #1" : "+r"(x));
@@ -78,7 +81,7 @@ diff --git a/bsd/dev/santoni_sdhci.c b/bsd/dev/santoni_sdhci.c
  }
  
  /*
-@@ -5673,6 +5736,7 @@
+@@ -5673,6 +5739,7 @@
  		sdhci_speedup();        /* 0349: optional, never fails the probe */
  		sweet_osm_dump();       /* 0351: boot-arg sweetosm=1 */
  		sweet_cpul();           /* 0352: boot-arg sweetcpul=L */
