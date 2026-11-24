@@ -1,0 +1,457 @@
+From: port_ios lavender
+Subject: [PATCH 0349] lavender: eMMC real 25/50 MHz and HS200 192 MHz (boot-arg sweetemmc_mode)
+
+The "25 MHz" GCC row was copied from msm8937 (GPLL0 800 MHz). On the SDM660 GCC
+GPLL0 is 600 MHz, so the card really ran at 18.75 MHz, which is why ADMA2 tops
+out at ~16 MB/s. Adds the real rows (GPLL0_EARLY_DIV 300 MHz: 25 and 50 MHz; GPLL4
+192 MHz, the value ABL leaves) and an opt-in speed-up, boot-arg sweetemmc_mode:
+1 = real 25 MHz, 2 = 50 MHz High Speed, 3 = HS200 192 MHz (CM DLL init as
+sdhci-msm msm_init_cm_dll, 16-phase CMD21 tuning against a reference block read
+at 50 MHz, middle of the longest good window). Each stage is checked against the
+EXT_CSD and four data chunks read at the previous speed and rolled back on any
+mismatch. Default (no boot-arg) is unchanged.
+
+diff --git a/bsd/dev/santoni_sdhci.c b/bsd/dev/santoni_sdhci.c
+--- a/bsd/dev/santoni_sdhci.c
++++ b/bsd/dev/santoni_sdhci.c
+@@ -380,9 +380,26 @@
+ static const struct santoni_gcc_rate santoni_gcc_rates[] = {
+ 	{ "400 kHz", 0x01u, 0xfcu, 0xfbu, 0x2017u },
+ 	{ "25 MHz",  0x01u, 0xfeu, 0xfdu, 0x211fu },
++	/*
++	 * 0349: the rows above were copied from msm8937 (GPLL0 800 MHz). On the
++	 * SDM660 GCC (gcc-sdm660.c ftbl_sdcc1_apps_clk_src) GPLL0 is 600 MHz, so
++	 * the old "25 MHz" row (SEL 1, h=16, m/n 1/2) really runs at 18.75 MHz;
++	 * that is why ADMA2 tops out at ~16 MB/s. Parent map: 0 XO, 1 GPLL0
++	 * (600), 5 GPLL4 (1536), 6 GPLL0_EARLY_DIV (300). SRC_DIV = 2*h - 1.
++	 *   25 MHz:  SEL 6, h=6,  m/n 1/2, dual edge -> CFG 0x260b
++	 *   50 MHz:  SEL 6, h=6,  no M/N             -> CFG 0x060b
++	 *   192 MHz: SEL 5, h=8,  no M/N             -> CFG 0x050f (what ABL left)
++	 * Rows with MODE 0 do not touch M/N/D, like clk_rcg2_configure().
++	 */
++	{ "25 MHz (real)", 0x01u, 0xfeu, 0xfdu, 0x260bu },
++	{ "50 MHz",        0x00u, 0x00u, 0x00u, 0x060bu },
++	{ "192 MHz",       0x00u, 0x00u, 0x00u, 0x050fu },
+ };
+ #define SANTONI_GCC_RATE_400K   0
+ #define SANTONI_GCC_RATE_25M    1
++#define SANTONI_GCC_RATE_25M_REAL 2
++#define SANTONI_GCC_RATE_50M    3
++#define SANTONI_GCC_RATE_192M   4
+ 
+ /*
+  * The relative card address the bootloader assigned in CMD3. Qualcomm LK/ABL
+@@ -2423,9 +2440,11 @@
+ 		return ENXIO;
+ 	}
+ 
+-	gcc_wr(GCC_SDCC1_APPS_M, r->m);
+-	gcc_wr(GCC_SDCC1_APPS_N, r->n);
+-	gcc_wr(GCC_SDCC1_APPS_D, r->d);
++	if (r->cfg & GCC_CFG_MODE_MASK) {       /* 0349: bypass rows keep M/N/D */
++		gcc_wr(GCC_SDCC1_APPS_M, r->m);
++		gcc_wr(GCC_SDCC1_APPS_N, r->n);
++		gcc_wr(GCC_SDCC1_APPS_D, r->d);
++	}
+ 
+ 	cfg &= ~(GCC_CFG_DIV_MASK | GCC_CFG_SEL_MASK | GCC_CFG_MODE_MASK);
+ 	cfg |= r->cfg;
+@@ -3931,6 +3950,388 @@
+ 		}
+ 	}
+ 	return EIO;
++}
++
++/*
++ * 0349: faster eMMC clock, opt-in with boot-arg sweetemmc_mode=N.
++ *   1: the real 25 MHz (the default row is 18.75 MHz on this GCC)
++ *   2: 50 MHz High Speed (52 MHz is the JEDEC limit of HS)
++ *   3: HS200 at 192 MHz (SDR, CM DLL + 16-phase CMD21 tuning, as sdhci-msm)
++ * Every stage is verified against what the slower one read (EXT_CSD and four
++ * 8 KiB blocks, three times) and the previous stage is restored on any
++ * mismatch or error, so a bad stage costs speed, never the boot.
++ */
++#define CORE_CLK_PWRSAVE        0x00000002u     /* VENDOR_SPEC BIT(1) */
++#define CORE_PWRSAVE_DLL        0x00000008u     /* VENDOR_SPEC3 BIT(3) */
++#define CORE_CDR_EXT_EN         0x00080000u     /* DLL_CONFIG BIT(19) */
++#define CORE_CDR_SELEXT_MASK    0x00f00000u     /* DLL_CONFIG [23:20] */
++#define CORE_MCLK_FREQ_MASK     0x07000000u     /* DLL_CONFIG [26:24] */
++#define SPEEDUP_NCHUNK          4
++#define SPEEDUP_CHUNK_BLOCKS    16u
++
++static uint8_t speedup_ref[SDHCI_BLOCK];
++static uint64_t speedup_hash[SPEEDUP_NCHUNK];
++static const uint32_t speedup_lba[SPEEDUP_NCHUNK] = { 0, 2048, 262144, 4194304 };
++
++static uint64_t
++speedup_fnv(const uint8_t *p, size_t n)
++{
++	uint64_t h = 0xcbf29ce484222325ull;
++
++	while (n--) {
++		h = (h ^ *p++) * 0x100000001b3ull;
++	}
++	return h;
++}
++
++/* Read the four test chunks; fill hash[] (skipped when NULL). */
++static int
++speedup_chunks(uint64_t *hash)
++{
++	for (int i = 0; i < SPEEDUP_NCHUNK; i++) {
++		int error;
++
++		dma_sync(SPEEDUP_CHUNK_BLOCKS * SDHCI_BLOCK, TRUE);
++		error = sdhci_read_pio(18, speedup_lba[i], SPEEDUP_CHUNK_BLOCKS,
++		    (void *)(se.dma + DMA_BOUNCE));
++		if (error) {
++			return error;
++		}
++		dma_sync(SPEEDUP_CHUNK_BLOCKS * SDHCI_BLOCK, TRUE);
++		hash[i] = speedup_fnv((const uint8_t *)(se.dma + DMA_BOUNCE),
++		    SPEEDUP_CHUNK_BLOCKS * SDHCI_BLOCK);
++	}
++	return 0;
++}
++
++/* EXT_CSD bytes 128.. match the reference (HS_TIMING, byte 185, may differ). */
++static int
++speedup_ext_csd_ok(void)
++{
++	uint8_t cur[SDHCI_BLOCK];
++	int error;
++
++	dma_sync(SDHCI_BLOCK, TRUE);
++	error = sdhci_read_pio(8, 0, 1, (void *)(se.dma + DMA_BOUNCE));
++	if (error) {
++		return error;
++	}
++	dma_sync(SDHCI_BLOCK, TRUE);
++	memcpy(cur, (const void *)(se.dma + DMA_BOUNCE), SDHCI_BLOCK);
++	cur[EXT_CSD_HS_TIMING] = speedup_ref[EXT_CSD_HS_TIMING];
++	return memcmp(cur + 128, speedup_ref + 128, SDHCI_BLOCK - 128) ? EIO : 0;
++}
++
++static int
++speedup_check(const char *what)
++{
++	for (int round = 0; round < 3; round++) {
++		uint64_t h[SPEEDUP_NCHUNK];
++		int error = speedup_ext_csd_ok();
++
++		if (!error) {
++			error = speedup_chunks(h);
++		}
++		if (!error && memcmp(h, speedup_hash, sizeof(h))) {
++			error = EILSEQ;
++		}
++		if (error) {
++			printf("WHYRED SDHCI: speedup: %s: check round %d failed (%d)\n",
++			    what, round, error);
++			return error;
++		}
++	}
++	printf("WHYRED SDHCI: speedup: %s: EXT_CSD and 4 data chunks identical "
++	    "(3 rounds)\n", what);
++	return 0;
++}
++
++static int
++speedup_rate(int idx, const char *what)
++{
++	int error = sdhci_gcc_set_apps(&santoni_gcc_rates[idx]);
++
++	if (!error) {
++		error = speedup_check(what);
++	}
++	return error;
++}
++
++/* CMD21 SEND_TUNING_BLOCK (HS200, 8-bit bus): one 128-byte block by PIO. */
++static int
++speedup_tune_read(uint8_t *out)
++{
++	uint32_t *dst = (uint32_t *)(void *)out;
++	uint32_t r1 = 0;
++	uint64_t deadline;
++	int error = sdhci_prepare_pio();
++
++	if (error) {
++		return error;
++	}
++	hc_wr(SDHCI_BLOCK_SIZE, (1u << 16) | SDHCI_MAKE_BLKSZ(0, 128));
++	error = sdhci_cmd(21, 0, SDHCI_TRNS_READ | SDHCI_TRNS_BLK_CNT_EN,
++	    SDHCI_CMD_RESP_SHORT | SDHCI_CMD_CRC | SDHCI_CMD_INDEX |
++	    SDHCI_CMD_DATA, &r1);
++	if (error) {
++		(void)sdhci_recover(false);
++		return error;
++	}
++	deadline = sdhci_pio_deadline(1);
++	for (uint32_t w = 0; w < 32; w++) {
++		error = sdhci_wait_data_until(SDHCI_INT_BRR, "CMD21 tuning", deadline);
++		if (error) {
++			(void)sdhci_recover(false);
++			(void)sdhci_drain_read_fifo();
++			return error;
++		}
++		dst[w] = hc_rd(SDHCI_BUFFER);
++	}
++	error = sdhci_wait_transfer_complete("CMD21 tuning", true, false);
++	if (error) {
++		(void)sdhci_recover(false);
++	}
++	return error;
++}
++
++/* msm_config_cm_dll_phase(): grey-coded delay line phase 0..15. */
++static int
++speedup_dll_phase(unsigned phase)
++{
++	static const uint8_t grey[16] = { 0x0, 0x1, 0x3, 0x2, 0x6, 0x7, 0x5,
++		0x4, 0xc, 0xd, 0xf, 0xe, 0xa, 0xb, 0x9, 0x8 };
++	uint32_t c = hc_rd(CORE_DLL_CONFIG);
++
++	c &= ~CORE_CDR_EXT_EN;
++	hc_wr(CORE_DLL_CONFIG, c);
++	c &= ~CORE_CK_OUT_EN;
++	hc_wr(CORE_DLL_CONFIG, c);
++	c = (c & ~CORE_CDR_SELEXT_MASK) | ((uint32_t)grey[phase & 15] << 20);
++	hc_wr(CORE_DLL_CONFIG, c);
++	c |= CORE_CDR_EXT_EN;
++	hc_wr(CORE_DLL_CONFIG, c);
++	c |= CORE_CK_OUT_EN;
++	hc_wr(CORE_DLL_CONFIG, c);
++	for (int i = 0; i < 50; i++) {
++		if (hc_rd(CORE_DLL_CONFIG) & CORE_CK_OUT_EN) {
++			return 0;
++		}
++		delay(1);
++	}
++	return ETIMEDOUT;
++}
++
++/* msm_init_cm_dll() for an SDCC v5 CM DLL, MCLK_FREQ 7 (<= 200 MHz). */
++static int
++speedup_dll_init(void)
++{
++	uint32_t c;
++
++	hc_wr(CORE_VENDOR_SPEC, hc_rd(CORE_VENDOR_SPEC) & ~CORE_CLK_PWRSAVE);
++	hc_wr(CORE_VENDOR_SPEC3, hc_rd(CORE_VENDOR_SPEC3) & ~CORE_PWRSAVE_DLL);
++	c = hc_rd(CORE_DLL_CONFIG);
++	c |= CORE_DLL_RST;
++	hc_wr(CORE_DLL_CONFIG, c);
++	c |= CORE_DLL_PDN;
++	hc_wr(CORE_DLL_CONFIG, c);
++	c = (c & ~CORE_MCLK_FREQ_MASK) | (7u << 24);
++	hc_wr(CORE_DLL_CONFIG, c);
++	c &= ~CORE_DLL_RST;
++	hc_wr(CORE_DLL_CONFIG, c);
++	c &= ~CORE_DLL_PDN;
++	hc_wr(CORE_DLL_CONFIG, c);
++	c |= CORE_DLL_EN;
++	hc_wr(CORE_DLL_CONFIG, c);
++	c |= CORE_CK_OUT_EN;
++	hc_wr(CORE_DLL_CONFIG, c);
++	for (int i = 0; i < 1000; i++) {
++		if (hc_rd(CORE_DLL_STATUS) & CORE_DLL_LOCK) {
++			printf("WHYRED SDHCI: speedup: DLL locked after %d us "
++			    "(DLL_CONFIG 0x%08x STATUS 0x%08x)\n", i,
++			    hc_rd(CORE_DLL_CONFIG), hc_rd(CORE_DLL_STATUS));
++			return 0;
++		}
++		delay(1);
++	}
++	printf("WHYRED SDHCI: speedup: DLL did not lock (DLL_CONFIG 0x%08x "
++	    "STATUS 0x%08x)\n", hc_rd(CORE_DLL_CONFIG), hc_rd(CORE_DLL_STATUS));
++	return ETIMEDOUT;
++}
++
++/* Middle of the longest circular run of good phases, or -1. */
++static int
++speedup_pick_phase(uint32_t mask)
++{
++	int best = -1, best_len = 0;
++
++	mask &= 0xffffu;
++	if (mask == 0) {
++		return -1;
++	}
++	if (mask == 0xffffu) {
++		return 8;
++	}
++	for (int s = 0; s < 16; s++) {
++		int len = 0;
++
++		if (!(mask & (1u << s)) || (mask & (1u << ((s + 15) & 15)))) {
++			continue;
++		}
++		while (len < 16 && (mask & (1u << ((s + len) & 15)))) {
++			len++;
++		}
++		if (len > best_len) {
++			best_len = len;
++			best = (s + len / 2) & 15;
++		}
++	}
++	return best;
++}
++
++/* Leave HS200: DLL off, feedback clock, 50 MHz, card back to High Speed. */
++static void
++speedup_hs200_restore(void)
++{
++	uint16_t hc2 = hc_rd16(SDHCI_HOST_CONTROL2);
++	uint32_t c = hc_rd(CORE_DLL_CONFIG);
++	int error;
++
++	hc_wr16(SDHCI_CLOCK_CONTROL, 0);
++	hc_wr16(SDHCI_HOST_CONTROL2, (uint16_t)(hc2 & ~(SDHCI_CTRL_UHS_MASK |
++	    SDHCI_CTRL_EXEC_TUNING | SDHCI_CTRL_TUNED_CLK)));
++	hc_wr(CORE_DLL_CONFIG, (c | CORE_DLL_RST | CORE_DLL_PDN) &
++	    ~(CORE_CK_OUT_EN | CORE_CDR_EXT_EN | CORE_DLL_EN));
++	error = sdhci_gcc_set_apps(&santoni_gcc_rates[SANTONI_GCC_RATE_50M]);
++	if (!error) {
++		error = sdhci_switch_ext_csd(EXT_CSD_HS_TIMING, 1,
++		    SDHCI_CTRL_HISPD, 0, "HS_TIMING=1 (leaving HS200)");
++	}
++	if (!error) {
++		error = speedup_check("back in High Speed at 50 MHz");
++	}
++	printf("WHYRED SDHCI: speedup: HS200 left, High Speed 50 MHz %s (%d)\n",
++	    error ? "NOT verified" : "verified", error);
++}
++
++static int
++speedup_hs200(void)
++{
++	uint8_t tref[128], tbuf[128];
++	uint32_t good = 0;
++	int error, phase;
++
++	error = sdhci_switch_ext_csd(EXT_CSD_HS_TIMING, 2, 0, 0,
++	    "HS_TIMING=2 (HS200)");
++	if (error) {
++		goto out_hs;
++	}
++	error = speedup_tune_read(tref);
++	if (error || tref[0] != 0xff || tref[1] != 0xff || tref[2] != 0x00 ||
++	    tref[3] != 0xff) {
++		printf("WHYRED SDHCI: speedup: HS200 reference tuning block at "
++		    "50 MHz unusable (%d, %02x %02x %02x %02x)\n", error,
++		    tref[0], tref[1], tref[2], tref[3]);
++		error = error ? error : EIO;
++		goto out_restore;
++	}
++	error = sdhci_gcc_set_apps(&santoni_gcc_rates[SANTONI_GCC_RATE_192M]);
++	if (error) {
++		goto out_restore;
++	}
++	hc_wr16(SDHCI_HOST_CONTROL2, (uint16_t)((hc_rd16(SDHCI_HOST_CONTROL2) &
++	    ~SDHCI_CTRL_UHS_MASK) | 3u));
++	error = speedup_dll_init();
++	if (error) {
++		goto out_restore;
++	}
++	for (unsigned p = 0; p < 16; p++) {
++		int e = speedup_dll_phase(p);
++
++		if (!e) {
++			e = speedup_tune_read(tbuf);
++		}
++		if (!e && !memcmp(tbuf, tref, sizeof(tbuf))) {
++			good |= 1u << p;
++		}
++	}
++	printf("WHYRED SDHCI: speedup: HS200 tuning phases 0x%04x (bit n = phase n good)\n", good);
++	phase = speedup_pick_phase(good);
++	if (phase < 0) {
++		error = EIO;
++		goto out_restore;
++	}
++	error = speedup_dll_phase((unsigned)phase);
++	if (!error) {
++		error = speedup_check("HS200 192 MHz");
++	}
++	if (error) {
++		goto out_restore;
++	}
++	{
++		uint64_t t0 = mach_absolute_time(), ns;
++		uint64_t h[SPEEDUP_NCHUNK];
++
++		for (int i = 0; i < 8 && !error; i++) {
++			error = speedup_chunks(h);
++		}
++		absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
++		printf("WHYRED SDHCI: speedup: HS200 192 MHz phase %d active; PIO "
++		    "chunk reads %d us\n", phase, (int)(ns / 1000));
++	}
++	return error;
++
++out_restore:
++	printf("WHYRED SDHCI: speedup: HS200 failed (%d)\n", error);
++	speedup_hs200_restore();
++	return error;
++out_hs:
++	/* The switch itself failed: the card is still (or again) in High Speed. */
++	printf("WHYRED SDHCI: speedup: HS200 switch failed (%d), staying in High Speed\n", error);
++	return error;
++}
++
++static void
++sdhci_speedup(void)
++{
++	uint32_t mode = 0;
++	int last = SANTONI_GCC_RATE_25M;
++	int error;
++
++	if (!PE_parse_boot_argn("sweetemmc_mode", &mode, sizeof(mode)) || mode == 0) {
++		return;
++	}
++	dma_sync(SDHCI_BLOCK, TRUE);
++	if (sdhci_read_pio(8, 0, 1, (void *)(se.dma + DMA_BOUNCE)) != 0) {
++		printf("WHYRED SDHCI: speedup: reference EXT_CSD read failed\n");
++		return;
++	}
++	dma_sync(SDHCI_BLOCK, TRUE);
++	memcpy(speedup_ref, (const void *)(se.dma + DMA_BOUNCE), SDHCI_BLOCK);
++	if (speedup_chunks(speedup_hash) != 0) {
++		printf("WHYRED SDHCI: speedup: reference chunk read failed\n");
++		return;
++	}
++	printf("WHYRED SDHCI: speedup: mode %u requested\n", mode);
++
++	if (mode >= 1) {
++		error = speedup_rate(SANTONI_GCC_RATE_25M_REAL, "25 MHz real");
++		if (error) {
++			(void)sdhci_gcc_set_apps(&santoni_gcc_rates[last]);
++			return;
++		}
++		last = SANTONI_GCC_RATE_25M_REAL;
++	}
++	if (mode >= 2) {
++		error = speedup_rate(SANTONI_GCC_RATE_50M, "50 MHz");
++		if (error) {
++			(void)sdhci_gcc_set_apps(&santoni_gcc_rates[last]);
++			return;
++		}
++		last = SANTONI_GCC_RATE_50M;
++	}
++	if (mode >= 3) {
++		(void)speedup_hs200();
++	}
+ }
+ 
+ /*
+@@ -4944,6 +5345,9 @@
+ 		error = sdhci_verify_highspeed_bus(se.sec_count);
+ 	}
+ 	if (!error) {
++		sdhci_speedup();        /* 0349: optional, never fails the probe */
++	}
++	if (!error) {
+ 		stage = "GPT partition";
+ 		error = santoni_sdhci_find_partition(se.part);
+ 	}
