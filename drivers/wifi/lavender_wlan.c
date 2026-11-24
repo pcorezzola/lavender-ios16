@@ -841,6 +841,7 @@ static boolean_t q_hello_sent, q_hello_rx, q_wlfw_seen;
 static uint8_t q_tx[4 + TFTP_BLK + 80];
 static uint8_t q_pending[4 + TFTP_BLK + 80];
 static uint32_t q_pending_len;
+static uint32_t q_pending_dport, q_last_dport;
 static unsigned g_ms, g_tx_msgs, g_rx_msgs;
 static uint32_t g_last_desc[4];
 static uint32_t g_last_intent_size, g_last_miss_len, g_max_intent_size;
@@ -1046,6 +1047,7 @@ wlan_glink_send(const void *data, uint32_t len)
 		if (len <= sizeof(q_pending) && q_pending_len == 0) {
 			memcpy(q_pending, data, len);
 			q_pending_len = len;
+			q_pending_dport = q_last_dport;
 		}
 		if (!g_intent_req_sent) {
 			wlan_glink_cmd(CMD_RX_INTENT_REQ, GLINK_LCID, len);
@@ -1107,6 +1109,7 @@ wlan_qrtr_send(uint32_t type, uint32_t src_port, uint32_t dst_node,
 	}
 	memcpy(q_tx + hlen, payload, len);
 	total = (hlen + len + 3) & ~3u;
+	q_last_dport = dst_port;
 	(void)wlan_glink_send(q_tx, total);
 }
 
@@ -1457,13 +1460,13 @@ wlan_tftp_req(uint32_t node, uint32_t port, const uint8_t *d, uint32_t len)
 		}
 	}
 	/*
-	 * 0746: the modem grants intents of 128, 512, 1152 and 8320 bytes,
-	 * and 4096-byte DATA (4132 with headers) entered an 8320 intent but
-	 * never reached the TFTP client. Negotiate 1024 so each DATA fits
-	 * the 1152-byte intent (RFC 2347 allows lowering the block).
+	 * 0747: OACKs (~80 B) reach the TFTP client but 4096- and
+	 * 1024-byte DATA (~4132 and ~1060 B) never do, so the limit is
+	 * the client's QRTR RX buffer. 448 bytes keeps the whole packet
+	 * under 512 B (the smallest non-control intent the modem grants).
 	 */
-	if (s->blk > 1024) {
-		s->blk = 1024;
+	if (s->blk > 448) {
+		s->blk = 448;
 	}
 	/*
 	 * Each DATA also carries a GLINK data header (8 B), a QRTR header
@@ -1544,16 +1547,11 @@ wlan_tftp_req(uint32_t node, uint32_t port, const uint8_t *d, uint32_t len)
 		    s->timeout, s->has_tsize, s->seek);
 		wlan_tftp_oack(s);
 		/*
-		 * Start the window right after the OACK, but only for the
-		 * real transfer (rsize = file size); the rsize-0 RRQs are
-		 * the eloader's size checks and must end with ERROR 9.
-		 * In the 0742 boot the eloader waited 10 s after the real
-		 * RRQ without ever sending ACK 0, then moved to the next
-		 * file. If it does ACK 0, the handler re-sends the window.
+		 * Wait for ACK 0 before the first block (as tqftpserv does).
+		 * A window sent before the ACK left a queued block that made
+		 * the post-ACK retransmission miss the client's 1 s timeout
+		 * by a few ms, so it never accepted block 1 (0746 boot).
 		 */
-		if (s->has_rsize && s->rsize != 0) {
-			wlan_tftp_window(s, 1);
-		}
 	} else {
 		wlan_tftp_data(s, 1);
 	}
@@ -1585,12 +1583,15 @@ wlan_tftp_sess_rx(uint32_t port, const uint8_t *d, uint32_t len)
 			printf("SWEET WLAN: tftp %s ack %u (sent %u)\n",
 			    s->name, block, s->sent);
 		}
+		/*
+		 * A queued DATA of this session is stale once its ACK
+		 * arrives: drop it so the retransmission starts now and
+		 * not after the client's 1 s timeout.
+		 */
+		if (q_pending_len != 0 && q_pending_dport == s->port) {
+			q_pending_len = 0;
+		}
 		if (block == 0) {
-			/*
-			 * Some clients skip ACK 0 and wait for DATA 1; the
-			 * early window below covers that, and a late ACK 0
-			 * just re-sends it (duplicates are harmless).
-			 */
 			wlan_tftp_window(s, 1);
 		} else if (block < s->sent) {
 			wlan_tftp_window(s, block + 1); /* cumulative ACK */
