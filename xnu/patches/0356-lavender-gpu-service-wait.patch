@@ -1,0 +1,49 @@
+From: port_ios lavender
+Subject: [PATCH 0356] lavender: GPU service waits 15 s for the CP and 10 s for the fence
+
+At 160 MHz a full-screen QuartzCore draw takes seconds; 3 s + 2 s made the service give up and
+leave the queue behind it.
+
+---
+diff --git a/bsd/dev/lavender_gpu.c b/bsd/dev/lavender_gpu.c
+--- a/bsd/dev/lavender_gpu.c
++++ b/bsd/dev/lavender_gpu.c
+@@ -1005,6 +1005,12 @@
+ 	ring_put(0x70000000u | (cnt & 0x3fff) | (pm4_parity(cnt) << 15) |
+ 	    ((opcode & 0x7f) << 16) | (pm4_parity(opcode) << 23));
+ }
++
++/*
++ * 0356: the wait for the CP is 300 polls of 10 ms (3 s) by default; the service raises it, because a
++ * full-screen draw of QuartzCore's 26k-word fragment shader takes seconds at 160 MHz.
++ */
++static int ring_wait_polls = 300;
+ 
+ /* Publish the packets and wait for the CP read pointer to catch up. */
+ static int
+@@ -1014,7 +1020,7 @@
+ 
+ 	flush_dcache64((addr64_t)ring_pa, RING_BYTES, TRUE);
+ 	wr(gpu, A5_CP_RB_WPTR, ring_wptr);
+-	for (int i = 0; i < 300; i++) {
++	for (int i = 0; i < ring_wait_polls; i++) {
+ 		rptr = rd(gpu, A5_CP_RB_RPTR);
+ 		if (rptr == ring_wptr) {
+ 			printf("LAVGPU: %s consumed: RPTR %u WPTR %u after %d ms\n",
+@@ -2722,6 +2728,7 @@
+ 		return 0;
+ 	}
+ 	seq = ++lav_svc_seq;
++	ring_wait_polls = 1500;				/* 15 s for a service stream */
+ 	for (uint32_t i = 0; i < count; i++) {
+ 		ring_put(dw[i]);
+ 	}
+@@ -2744,7 +2751,7 @@
+ 		*status = EIO;
+ 		return 0;
+ 	}
+-	for (int i = 0; i < 2000; i++) {
++	for (int i = 0; i < 10000; i++) {
+ 		flush_dcache64((addr64_t)(rptr_pa + 0xe00), 64, TRUE);
+ 		if (*f == seq) {
+ 			return seq;
