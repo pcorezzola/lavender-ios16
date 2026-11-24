@@ -11,7 +11,7 @@ be re-enabled one by one by dropping them from the list. Default off.
 diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
 --- a/bsd/kern/kern_exec.c
 +++ b/bsd/kern/kern_exec.c
-@@ -3339,10 +3339,59 @@
+@@ -3339,10 +3339,65 @@
  		error = setuid(p, &args, NULL);
  		if (error) {
  			return error;
@@ -36,7 +36,13 @@ diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
 +	char path[128];
 +	const char *base, *p;
 +	size_t blen;
++	static int first = 1;
 +
++	/* the first exec is the kernel starting launchd: copyinstr faults there */
++	if (first) {
++		first = 0;
++		return 0;
++	}
 +	if (state < 0) {
 +		list[0] = 0;
 +		state = PE_parse_boot_argn("sweetexecdeny", list, sizeof(list)) ? 1 : 0;
@@ -71,7 +77,7 @@ diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
  
  /*
   * posix_spawn
-@@ -3448,6 +3497,13 @@
+@@ -3448,6 +3503,13 @@
  	imgp->ip_inherited_jop_pid = 0;
  	uthread_set_exec_data(current_uthread(), imgp);
  
@@ -85,7 +91,7 @@ diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
  	if (uap->adesc != USER_ADDR_NULL) {
  		if (is_64) {
  			error = copyin(uap->adesc, &px_args, sizeof(px_args));
-@@ -5009,6 +5065,14 @@
+@@ -5009,6 +5071,14 @@
  	}
  #endif /* ARM64_BOARD_CONFIG_LAVENDER */
  
