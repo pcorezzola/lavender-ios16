@@ -2357,6 +2357,16 @@ glink_rx_one(void)
 		glink_rx_msgs++;
 		break;
 	}
+	case GCMD_RX_DONE:
+	case GCMD_RX_DONE_W_REUSE:
+		for (uint32_t i = 0; i < glink_ri_count; i++) {
+			if (glink_ri[i].id == m.p2) {
+				glink_ri[i].used = 0;
+				break;
+			}
+		}
+		glink_rx_advance(8);
+		break;
 	case GCMD_CLOSE_ACK:
 	case GCMD_SIGNALS:
 	case GCMD_READ_NOTIF:
