@@ -1,0 +1,70 @@
+From: port_ios lavender
+Subject: [PATCH 0351] lavender: read-only dump of the CPU OSM/PLL/RCG registers (sweetosm=1)
+
+The Gold cores measure ~570 MHz (no cpufreq driver, ABL leaves the cluster low).
+Before writing anything, print the non-zero rows of the OSM block (0x179c0000),
+the Gold PLL (0x17816000) and RCG (0x17811000) and the Silver PLL (0x17916000)
+so the LUT and PERF_STATE can be matched with the downstream clk-cpu-osm.
+
+diff --git a/bsd/dev/santoni_sdhci.c b/bsd/dev/santoni_sdhci.c
+--- a/bsd/dev/santoni_sdhci.c
++++ b/bsd/dev/santoni_sdhci.c
+@@ -4525,6 +4525,50 @@
+ }
+ 
+ /*
++ * 0351: read-only dump of the SDM660 CPU clock/OSM registers (boot-arg sweetosm=1).
++ * Measured with a dependent-add loop the Gold cores run at ~570 MHz: lavender has no
++ * cpufreq driver and ABL leaves the cluster low. The downstream DT (clk-cpu-osm)
++ * puts the OSM at 0x179c0000, the Gold PLL at 0x17816000 and its RCG at 0x17811050.
++ * Only non-zero rows of 4 words are printed.
++ */
++static void
++sweet_osm_dump_range(const char *name, uint64_t phys, uint32_t size)
++{
++	vm_offset_t va = ml_io_map((vm_offset_t)phys, size);
++
++	if (va == 0) {
++		printf("SWEET OSM: %s: no mapping\n", name);
++		return;
++	}
++	for (uint32_t off = 0; off < size; off += 16) {
++		uint32_t w[4];
++
++		for (int i = 0; i < 4; i++) {
++			w[i] = *(volatile uint32_t *)(va + off + 4 * i);
++		}
++		if (w[0] | w[1] | w[2] | w[3]) {
++			printf("SWEET OSM: %s+0x%04x: %08x %08x %08x %08x\n", name, off,
++			    w[0], w[1], w[2], w[3]);
++		}
++	}
++}
++
++static void
++sweet_osm_dump(void)
++{
++	uint32_t on = 0;
++
++	if (!PE_parse_boot_argn("sweetosm", &on, sizeof(on)) || on == 0) {
++		return;
++	}
++	sweet_osm_dump_range("osm", 0x179c0000ull, 0x4000);
++	sweet_osm_dump_range("perfpll", 0x17816000ull, 0x1000);
++	sweet_osm_dump_range("perfrcg", 0x17811000ull, 0x1000);
++	sweet_osm_dump_range("pwrpll", 0x17916000ull, 0x1000);
++	printf("SWEET OSM: dump done\n");
++}
++
++/*
+  * 0179: sdhci_read_pio()/sdhci_write_pio() already leave the controller
+  * recovered before they return an error - sdhci_recover() resets the
+  * command/data paths and, if an inhibit bit is still stuck, cycles the card
+@@ -5537,6 +5581,7 @@
+ 	}
+ 	if (!error) {
+ 		sdhci_speedup();        /* 0349: optional, never fails the probe */
++		sweet_osm_dump();       /* 0351: boot-arg sweetosm=1 */
+ 	}
+ 	if (!error) {
+ 		stage = "GPT partition";
