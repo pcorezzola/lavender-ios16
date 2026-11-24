@@ -85,12 +85,13 @@ diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
  	if (uap->adesc != USER_ADDR_NULL) {
  		if (is_64) {
  			error = copyin(uap->adesc, &px_args, sizeof(px_args));
-@@ -5009,6 +5065,13 @@
+@@ -5009,6 +5065,14 @@
  	}
  #endif /* ARM64_BOARD_CONFIG_LAVENDER */
  
 +#if defined(ARM64_BOARD_CONFIG_LAVENDER)
-+	if (sweet_exec_denied(uap->fname)) {
++	/* pid 1: the kernel's own exec of launchd (copyinstr faults there) */
++	if (p->p_pid != 1 && sweet_exec_denied(uap->fname)) {
 +		error = EPERM;
 +		goto exit_with_error;
 +	}
