@@ -5,14 +5,18 @@ The Gold cores measure ~570 MHz (no cpufreq driver, ABL leaves the cluster low).
 Before writing anything, print the non-zero rows of the OSM block (0x179c0000),
 the Gold PLL (0x17816000) and RCG (0x17811000) and the Silver PLL (0x17916000)
 so the LUT and PERF_STATE can be matched with the downstream clk-cpu-osm.
-
 diff --git a/bsd/dev/santoni_sdhci.c b/bsd/dev/santoni_sdhci.c
 --- a/bsd/dev/santoni_sdhci.c
 +++ b/bsd/dev/santoni_sdhci.c
-@@ -4525,6 +4525,50 @@
- }
- 
- /*
+@@ -4520,10 +4520,57 @@
+ 		error = speedup_hs200();
+ 		if (!error && mode >= 4) {
+ 			(void)speedup_hs400();
++		}
++	}
++}
++
++/*
 + * 0351: read-only dump of the SDM660 CPU clock/OSM registers (boot-arg sweetosm=1).
 + * Measured with a dependent-add loop the Gold cores run at ~570 MHz: lavender has no
 + * cpufreq driver and ABL leaves the cluster low. The downstream DT (clk-cpu-osm)
@@ -33,14 +37,14 @@ diff --git a/bsd/dev/santoni_sdhci.c b/bsd/dev/santoni_sdhci.c
 +
 +		for (int i = 0; i < 4; i++) {
 +			w[i] = *(volatile uint32_t *)(va + off + 4 * i);
-+		}
+ 		}
 +		if (w[0] | w[1] | w[2] | w[3]) {
 +			printf("SWEET OSM: %s+0x%04x: %08x %08x %08x %08x\n", name, off,
 +			    w[0], w[1], w[2], w[3]);
 +		}
-+	}
-+}
-+
+ 	}
+ }
+ 
 +static void
 +sweet_osm_dump(void)
 +{
@@ -53,14 +57,16 @@ diff --git a/bsd/dev/santoni_sdhci.c b/bsd/dev/santoni_sdhci.c
 +	sweet_osm_dump_range("perfpll", 0x17816000ull, 0x1000);
 +	sweet_osm_dump_range("perfrcg", 0x17811000ull, 0x1000);
 +	sweet_osm_dump_range("pwrpll", 0x17916000ull, 0x1000);
++	/* Gold L2 SAW (0x17812c18 = APCLUS1_L2_SAW4_PMIC_STS: the voltage last sent to the PMIC) and the perf CPRh. */
++	sweet_osm_dump_range("goldsaw", 0x17812000ull, 0x1000);
++	sweet_osm_dump_range("goldcpr", 0x179c7000ull, 0x1000);
 +	printf("SWEET OSM: dump done\n");
 +}
 +
-+/*
+ /*
   * 0179: sdhci_read_pio()/sdhci_write_pio() already leave the controller
   * recovered before they return an error - sdhci_recover() resets the
-  * command/data paths and, if an inhibit bit is still stuck, cycles the card
-@@ -5537,6 +5581,7 @@
+@@ -5537,6 +5584,7 @@
  	}
  	if (!error) {
  		sdhci_speedup();        /* 0349: optional, never fails the probe */
