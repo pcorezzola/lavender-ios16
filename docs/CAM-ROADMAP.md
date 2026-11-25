@@ -177,6 +177,10 @@ Cada agente trabaja su función por su cuenta; lo compartido es el repo.
    `SRC_SEL` en bits 10:8; `STATUS` de una alfa-PLL DEFAULT en `+0x24`; TLMM
    de SDM660: mux bits 4:2, pull 1:0, fuerza 8:6, OE bit 9, IO en `+4`
    (in bit 0, out bit 1); en el SMMU `sCR0` es `+0x0` e `IDR0/IDR1` `+0x20/0x24`.
+   El GPIO SPMI del PM660L (qpnp-pin): `TYPE 0x04` (= `0x10` si es GPIO),
+   `RT_STS 0x10`, `MODE_CTL 0x40` (valor bit 0, función 3:1, dirección 6:4),
+   `DIG_VIN_CTL 0x41`, `EN_CTL 0x46` (bit 7 master-en); **no hay STATUS en
+   `0x08`** (eso es de los PM8xxx viejos). Pads: `0xc000 + 0x100·(pin−1)`.
 11. **Los rails de los sensores son LDOs del PM660/PM660L por SPMI**: reutilizar
    el camino que verificó el driver de audio, solo con los voltajes de la DTB.
 12. **La dirección y el valor del chip ID no están en la DTB**: MIUI los trae
