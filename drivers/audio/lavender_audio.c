@@ -52,6 +52,7 @@
  *   lavaud=11       also open an ADM playback device path (COPP) to 0x1036
  *   lavaud=12       also open the ASM stream, route it to the COPP, set the
  *                   media format and run it
+ *   lavaud=13       also map a 16 KiB tone buffer and write it with ASM
  *   lavaudforce=1   A3: load even if SMEM shows an ADSP from an earlier run
  *   lavaudcopy=0    A3: skip the segment copy (test a preloaded carve-out)
  *   lavaudprobe=1   A3: read the carve-out and print copy progress every 256K
@@ -337,6 +338,9 @@ struct smp2p_entry {
 #define ASM_TOPOLOGY_NONE              0x00010C68u
 #define ASM_MEDIA_FMT_MULTI_CHANNEL_PCM_V2 0x00010DA5u
 #define STREAM_PORT                    0x0101u
+#define ASM_CMD_SHARED_MEM_MAP_REGIONS 0x00010D92u
+#define ASM_CMDRSP_SHARED_MEM_MAP_REGIONS 0x00010D93u
+#define ASM_DATA_CMD_WRITE_V2          0x00010DABu
 
 struct glink_msg {
 	uint16_t cmd, p1;
@@ -412,6 +416,7 @@ static unsigned glink_ri_count;
 static unsigned glink_tx_msgs, glink_rx_msgs;
 static unsigned glink_intent_log;
 static uint32_t adm_status, adm_copp;
+static uint32_t asm_map_handle, asm_map_status;
 
 static inline uint32_t
 audio_rd(vm_offset_t base, uint32_t off)
@@ -2338,6 +2343,17 @@ glink_rx_one(void)
 						    "status %u copp %x\n",
 						    adm_status, adm_copp);
 					}
+					if (a->opcode ==
+					    ASM_CMDRSP_SHARED_MEM_MAP_REGIONS) {
+						asm_map_handle =
+						    audio_le32(p);
+						asm_map_status =
+						    audio_le32(p + 4);
+						printf("SWEET AUDIO: ASM map "
+						    "handle %x status %u\n",
+						    asm_map_handle,
+						    asm_map_status);
+					}
 				}
 				printf("SWEET AUDIO: APR raw len %u pkt %u "
 				    "hdr %04x chunk %u:", len, a->pkt_size,
@@ -2684,6 +2700,81 @@ audio_asm_route(void)
 	}
 	printf("SWEET AUDIO: ASM/ADM route done (copp %x, tx %u rx %u)\n",
 	    adm_copp, glink_tx_msgs, glink_rx_msgs);
+}
+
+/*
+ * F6 data plane: a contiguous 16 KiB buffer with a 1 kHz stereo tone, mapped
+ * for ASM with ASM_CMD_SHARED_MEM_MAP_REGIONS and written with
+ * ASM_DATA_CMD_WRITE_V2. The address is the physical page (the DSP's view).
+ */
+static void
+audio_asm_tone(void)
+{
+	static const int16_t tone[48] = {
+		0, 428, 848, 1254, 1638, 1995, 2317, 2600,
+		2838, 3028, 3165, 3249, 3277, 3249, 3165, 3028,
+		2838, 2600, 2317, 1995, 1638, 1254, 848, 428,
+		0, -428, -848, -1254, -1638, -1995, -2317, -2600,
+		-2838, -3028, -3165, -3249, -3277, -3249, -3165, -3028,
+		-2838, -2600, -2317, -1995, -1638, -1254, -848, -428,
+	};
+	struct {
+		uint16_t pool, regions;
+		uint32_t property;
+		uint32_t low, high, size;
+	} __attribute__((packed)) map = {
+		3, 1, 0, 0, 0, 16384
+	};
+	uint32_t wr[8];
+	uint32_t ms;
+	vm_offset_t buf;
+	uint64_t pa;
+	int err;
+
+	if (audio_step < 13) {
+		return;
+	}
+	audio_announce("ASM tone buffer (16 KiB) and 1 kHz write");
+	err = audio_contig(16384, &buf, &pa);
+	if (err != 0) {
+		printf("SWEET AUDIO: tone buffer allocation failed %d\n", err);
+		return;
+	}
+	int16_t *s = (int16_t *)buf;
+	for (uint32_t i = 0; i < 4096; i++) {
+		s[2 * i] = tone[i % 48];
+		s[2 * i + 1] = tone[i % 48];
+	}
+	flush_dcache64(pa, 16384, TRUE);
+	printf("SWEET AUDIO: tone buffer pa %llx (va %lx)\n",
+	    (unsigned long long)pa, (unsigned long)buf);
+
+	map.low = (uint32_t)pa;
+	map.high = (uint32_t)(pa >> 32);
+	(void)glink_send_apr_pkt(APR_SVC_ASM, 0, 0,
+	    ASM_CMD_SHARED_MEM_MAP_REGIONS, &map, sizeof(map), 10);
+	for (ms = 0; ms < 500; ms += 10) {
+		while (glink_rx_one()) {
+		}
+		audio_wait(10);
+	}
+	printf("SWEET AUDIO: ASM map handle %x status %u\n", asm_map_handle,
+	    asm_map_status);
+
+	memset(wr, 0, sizeof(wr));
+	wr[0] = (uint32_t)pa;
+	wr[1] = (uint32_t)(pa >> 32);
+	wr[2] = asm_map_handle;
+	wr[3] = 16384;
+	(void)glink_send_apr_pkt(APR_SVC_ASM, STREAM_PORT, STREAM_PORT,
+	    ASM_DATA_CMD_WRITE_V2, wr, sizeof(wr), 11);
+	for (ms = 0; ms < 2000; ms += 10) {
+		while (glink_rx_one()) {
+		}
+		audio_wait(10);
+	}
+	printf("SWEET AUDIO: ASM write 16 KiB tone sent (tx %u rx %u)\n",
+	    glink_tx_msgs, glink_rx_msgs);
 }
 
 /*
@@ -3109,6 +3200,9 @@ lavender_audio_thread(__unused void *arg, __unused wait_result_t wr)
 	}
 	if (audio_step >= 12) {
 		audio_asm_route();
+	}
+	if (audio_step >= 13) {
+		audio_asm_tone();
 	}
 
 	printf("SWEET AUDIO: probe done (lavaud=%u)\n", audio_step);
