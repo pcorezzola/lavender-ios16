@@ -24,6 +24,7 @@ CAMSS completo de SDM660 y tres sensores; el DTBO del dispositivo es un stub
 | Bloque | MMIO | Notas |
 |---|---|---|
 | MMCC (todos los relojes de cámara) | `0xc8c0000` | GDSC `camss_top` `+0x34a0`, `camss_vfe0/1` `+0x3664/0x3674`; `bimc_smmu` `+0xe020` **sin escribir** |
+| TLMM | south `0x03100000`, center `0x03500000`, north `0x03900000` | tres tiles de 4 MB buscados por nombre; los pines de cámara (32–52) son del tile `south`, `0x1000` por GPIO |
 | CSIPHY0/1/2 (v3.5) | `0xc824000` + `0x1000·n` | mux de reloj en `0xca00120` + `4·n` |
 | CCI | `0xca0c000` | el I2C de los sensores |
 | CSID0..3 (v5.0) | `0xca30000` + `0x400·n` | dentro del dominio de energía del VFE |
@@ -39,7 +40,7 @@ ofilm y sunny); el que trae **esta** unidad se decide leyendo su chip ID en F1.
 
 | Fase | Alcance | Estado |
 |---|---|---|
-| F0 | Sonda de solo lectura (`lvcam=1`, parche 1001): dominios, ramas de reloj, MMPLL10 y RCG de MMCC, pines de cámara en TLMM, identidad del SMMU | ⬜ PENDIENTE |
+| F0 | Sonda de solo lectura (`lvcam=1`, parche 1001): dominios, ramas de reloj, MMPLL10 y RCG de MMCC, pines de cámara en TLMM, identidad del SMMU | ✅ COMPLETA (2026-11-25) |
 | F0b | Encendido de `camss_top` y las ramas AHB, muxes de reloj CSI e interfaces de registro del CSIPHY, apagado de lo encendido (`lvcam=2`, parche 1001) | ⬜ PENDIENTE |
 | F1 | CCI: reloj, reset, timings del DTB y transacciones; rails, MCLK y secuencia de encendido del sensor; **chip ID** (`~1010`) | ⬜ PENDIENTE |
 | F2 | Patrón de test del CSID → VFE (RDI) → frame en memoria, sin sensor (`~1020`) | ⬜ PENDIENTE |
@@ -68,7 +69,7 @@ ofilm y sunny); el que trae **esta** unidad se decide leyendo su chip ID en F1.
 - Si el archivo se congela, relanzar el script antes de diagnosticar (relee el
   anillo del kernel desde el principio); leer siempre la última corrida.
 
-## F0 — sonda de solo lectura — ⬜ PENDIENTE
+## F0 — sonda de solo lectura — ✅ COMPLETA
 
 `lvcam=1` no escribe nada. Responde: ¿el bootloader dejó `camss_top` (o los
 GDSC del VFE) encendidos? ¿qué ramas de reloj están habilitadas y está lockeado
@@ -81,6 +82,25 @@ AHB ya están encendidos lee los registros del CAMSS.
 `ispif_ahb` y `csiphy_ahb2crif`, leer los muxes de reloj CSI y los controles
 del CSIPHY, y volver a dejar todo como estaba. Si el dominio no encende, pone el
 bit de colapso de vuelta y no toca los bloques.
+
+Resultados del teléfono (2026-11-25, shim `cam-readonly-1001`, log en
+`work/cam/cam-1001-lvcam1-2026-11-25.txt`):
+
+- **El bootloader deja `camss_top` ENCENDIDO** (`gdscr a0222000`, pwr_on 1,
+  sin colapso), y también `bimc_smmu` (`a0222000`). Los GDSC del VFE0/1 y del
+  CPP quedan colapsados (`00222001`): F1 no necesita encender `camss_top`,
+  pero sí los del VFE para CSID/VFE.
+- **Los relojes AHB de cámara están apagados** (`camss_top_ahb`, `camss_ahb`,
+  `ispif_ahb`, `csiphy_ahb2crif`, `cci*`, `mclk*`, `csi*`, `vfe*` con
+  `CLK_OFF`); sí están arriba `mnoc_ahb`, `bimc_smmu_ahb/axi` (votados) y
+  `throttle_camss_axi`. Por eso `lvcam=1` no lee el CAMSS.
+- **MMPLL10 apagada** (modo 0, `lock` 0) y los nueve RCG con `root_off=1`:
+  nada de cámara tocó el bootloader. F1 tiene que configurar el reloj de MCLK.
+- **SMMU MMSS arriba**: `sCR0 0x00200626` (clientpd 0 = traduciendo),
+  `IDR0 0x48017834` (S1TS 1, S2TS 0, 16 bits de SID), `IDR1 0x40008011`
+  (17 context banks). El display lo está usando: no se toca.
+- Los pines de cámara se leyeron en la base equivocada en 1001 (todo cero);
+  **1001b** los lee del tile `south` (`0x03100000`).
 
 ## F1 y siguientes
 
@@ -128,24 +148,32 @@ Cada agente trabaja su función por su cuenta; lo compartido es el repo.
    de energía del VFE** (mainline enciende el VFE antes de leer el CSID). Sus
    registros no se leen hasta levantar eso; con los relojes o el dominio
    apagados el acceso puede colgar el bus.
-6. **El GDSC `bimc_smmu` de MMCC (`0xe020`) no se escribe**: mainline lo
+6. **Los pines del TLMM no están en `0x03000000`**: el bloque tiene tres
+   tiles de 4 MB que se buscan **por nombre** (`south/center/north` =
+   `0x03100000/0x03500000/0x03900000`); los GPIO 32–52 son del `south`. La
+   lectura en `0x03000000 + 0x1000·n` devolvió ceros (visto en el teléfono).
+7. **El I2C del sensor no necesita el bloque CCI**: hakios lo hace por
+   software sobre los mismos pines (open-drain con pull-up interno, 5 µs por
+   semi-bit, guarda y restaura CFG/IO de los pines, y desatasca el bus con
+   nueve clocks). Es el plan de F1.
+8. **El GDSC `bimc_smmu` de MMCC (`0xe020`) no se escribe**: mainline lo
    tiene comentado por colgar el subsistema multimedia. Sus ramas
    (`0xe004`/`0xe008`) son `BRANCH_VOTED`: solo se leen.
-7. **MMCC está en `0xc8c0000`** (no en `0xc8a0000`) y ahí están todos los
+9. **MMCC está en `0xc8c0000`** (no en `0xc8a0000`) y ahí están todos los
    relojes de cámara; GCC no tiene ninguno.
-8. **Valores verificados en fuente** (aunque otros SoC usen otros): GDSCR
+10. **Valores verificados en fuente** (aunque otros SoC usen otros): GDSCR
    `PWR_ON` bit 31 / `SW_COLLAPSE` bit 0; CBCR `CLOCK_ENABLE` bit 0 /
    `CLK_OFF` bit 31 (y en modo de clock-gating por hardware Linux no mira
    `CLK_OFF`); RCG2 `CMD` bit 0 `UPDATE`, bit 1 `ROOT_EN`, `CFG` en `+4` con
    `SRC_SEL` en bits 10:8; `STATUS` de una alfa-PLL DEFAULT en `+0x24`; TLMM
    de SDM660: mux bits 4:2, pull 1:0, fuerza 8:6, OE bit 9, IO en `+4`
    (in bit 0, out bit 1); en el SMMU `sCR0` es `+0x0` e `IDR0/IDR1` `+0x20/0x24`.
-9. **Los rails de los sensores son LDOs del PM660/PM660L por SPMI**: reutilizar
+11. **Los rails de los sensores son LDOs del PM660/PM660L por SPMI**: reutilizar
    el camino que verificó el driver de audio, solo con los voltajes de la DTB.
-10. **La dirección y el valor del chip ID no están en la DTB**: MIUI los trae
+12. **La dirección y el valor del chip ID no están en la DTB**: MIUI los trae
     en los `.bin` de camx (`/vendor/lib64/camera/com.qti.sensormodule.*`). F1
     los sondea o usa los registros estándar de cada sensor.
-11. **Memoria Device**: `ml_io_map_unmappable` y copias byte a byte (los
+13. **Memoria Device**: `ml_io_map_unmappable` y copias byte a byte (los
     `STNP` de `memcpy`/`memset` no son seguros), como en el resto de drivers.
-12. **El log USB arranca a los ~20–30 s** y el anillo se relee al relanzar el
+14. **El log USB arranca a los ~20–30 s** y el anillo se relee al relanzar el
     script; un archivo congelado no es un cuelgue del kernel.

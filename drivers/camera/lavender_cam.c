@@ -1,5 +1,7 @@
 /*
  * lavender: camera (CAMSS SDM660) platform probe, F0. Boot-arg gated.
+ * 1001b: the camera pins live in the TLMM south tile (0x03100000); 1001
+ * read 0x03000000 and got zeros. SMMU IDR fields decoded per arm-smmu.h.
  *
  *   lvcam=1         run the F0 read-only probe: the MMCC camera power
  *                   domains, clock branches, MMPLL10 and the camera RCGs as
@@ -45,7 +47,7 @@
  *     stop, and do the CSI clock muxes and the CSIPHY register interfaces
  *     answer (their hardware versions, CCI/CSID/VFE, come in F1 and F2)?
  *   - how are the camera GPIOs left (MCLK 32/33/35, CCI 36-39, resets
- *     47/48/52, standby 45, VAF 50)?
+ *     47/48/52, standby 45, VAF 50, all in the TLMM's south tile)?
  *   - is the MMSS SMMU (0xcd00000, the one the VFE writes through) up?
  *
  * Register meanings: Linux gdsc.c, clk-branch.c, clk-rcg2.c,
@@ -123,10 +125,15 @@ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
 #define CAM_CSIPHY_CTRL6        0x00818u     /* bit 0 PWRDN_B */
 #define CAM_CSIPHY_STATUS0      0x008b0u     /* interrupt status 0 */
 
-/* TLMM (pinctrl@03000000): 0x1000 per GPIO; CTL at +0 (pull 1:0, func 4:2,
- * drive 8:6, OE 9), IO at +4 (in bit 0, out bit 1) for sdm660. */
-#define CAM_TLMM_PA             0x03000000u
-#define CAM_TLMM_SIZE           0x000c0000u
+/* TLMM: three 4 MB tiles looked up by name (mainline sdm630.dtsi):
+ * south 0x03100000, center 0x03500000, north 0x03900000. The camera pins
+ * (32-52) are all in the south tile: 0x1000 per GPIO, CTL at +0 (pull 1:0,
+ * func 4:2, drive 8:6, OE 9), IO at +4 (in bit 0, out bit 1).
+ * Device result (1001, lvcam=1): the vendor DTB declares one 0xc00000 range
+ * from 0x03000000, but the pin registers start at the tile bases; reading
+ * 0x03000000 + 0x1000*n returned zeros, so 1001b moves to the south base. */
+#define CAM_TLMM_SOUTH_PA       0x03100000u
+#define CAM_TLMM_SOUTH_SIZE     0x00040000u
 
 /* MMSS SMMU (qcom,smmu-v2 at 0xcd00000): sCR0, IDR0..IDR1, s2cr0. */
 #define CAM_SMMU_PA             0x0cd00000u
@@ -524,6 +531,7 @@ cam_gpios(void)
 	unsigned i;
 
 	cam_announce("read the camera TLMM pins (read only)");
+	printf("SWEET CAM: tlmm south tile @%08x\n", CAM_TLMM_SOUTH_PA);
 	for (i = 0; i < CAM_NITEMS(pins); i++) {
 		ctl = cam_rd(tlmm, pins[i] * 0x1000u);
 		io = cam_rd(tlmm, pins[i] * 0x1000u + 4u);
@@ -550,10 +558,14 @@ cam_smmu(void)
 	idr0 = cam_rd(smmu_mmss, CAM_SMMU_IDR0);
 	idr1 = cam_rd(smmu_mmss, CAM_SMMU_IDR1);
 	s2cr0 = cam_rd(smmu_mmss, CAM_SMMU_S2CR0);
-	/* sCR0 bit 0 CLIENTPD: 1 = the SMMU is not translating. */
-	printf("SWEET CAM: mmss smmu scr0 %08x (clientpd %u) idr0 %08x idr1 "
-	    "%08x (numcb %u, nums2cr %u) s2cr0 %08x\n", scr0, scr0 & 1u, idr0,
-	    idr1, idr1 & 0xffu, (idr1 >> 16) & 0xffu, s2cr0);
+	/* sCR0 bit 0 CLIENTPD: 1 = the SMMU is not translating. IDR0: S1TS
+	 * bit 30, S2TS 29, NTS 28, NUMSIDB 12:9, NUMSMRG 7:0; IDR1: NUMCB
+	 * 7:0, NUMS2CB 23:16 (arm-smmu.h). */
+	printf("SWEET CAM: mmss smmu scr0 %08x (clientpd %u) idr0 %08x "
+	    "(s1ts %u, s2ts %u, nts %u, smr %u) idr1 %08x (numcb %u, "
+	    "nums2cb %u) s2cr0 %08x\n", scr0, scr0 & 1u, idr0,
+	    (idr0 >> 30) & 1u, (idr0 >> 29) & 1u, (idr0 >> 28) & 1u,
+	    idr0 & 0xffu, idr1, idr1 & 0xffu, (idr1 >> 16) & 0xffu, s2cr0);
 }
 
 static void
@@ -615,7 +627,7 @@ lavender_cam_thread(__unused void *arg, __unused wait_result_t wr)
 		cam_domain_power_down();
 	}
 
-	tlmm = ml_io_map(CAM_TLMM_PA, CAM_TLMM_SIZE);
+	tlmm = ml_io_map(CAM_TLMM_SOUTH_PA, CAM_TLMM_SOUTH_SIZE);
 	if (tlmm != 0) {
 		cam_gpios();
 	} else {
