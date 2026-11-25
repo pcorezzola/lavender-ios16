@@ -910,28 +910,31 @@ static boolean_t
 wlan_tx_write(const void *hdr, uint32_t hlen, const void *data, uint32_t dlen)
 {
 	uint32_t head = 0, tail = 0, avail = 0, need;
-	int n;
+	static uint32_t last_full;
 
 	if (g_desc == NULL || g_tx == NULL) {
 		return FALSE;
 	}
 	need = (hlen + dlen + 7) & ~7u;
-	for (n = 0; n < 1000; n++) {
-		head = g_desc[1];
-		tail = g_desc[0];
-		avail = tail <= head ? GLINK_TX_SIZE - head + tail :
-		    tail - head;
-		avail = avail < 8 ? 0 : avail - 8;
-		if (avail >= need) {
-			break;
+	/*
+	 * Never wait for the modem here: this runs inside the RX handler,
+	 * so blocking stops the very processing that frees the FIFO and
+	 * deadlocks the transfer (0747 stalled at block 800). The caller
+	 * queues the packet and the poll loop retries.
+	 */
+	head = g_desc[1];
+	tail = g_desc[0];
+	avail = tail <= head ? GLINK_TX_SIZE - head + tail : tail - head;
+	avail = avail < 8 ? 0 : avail - 8;
+	if (avail < need) {
+		if (last_full != need) {
+			last_full = need;
+			printf("SWEET WLAN: glink TX busy (%u need, %u free)\n",
+			    need, avail);
 		}
-		delay(100);
-	}
-	if (n == 1000) {
-		printf("SWEET WLAN: glink TX FIFO full (head %x tail %x)\n",
-		    head, tail);
 		return FALSE;
 	}
+	last_full = 0;
 	head = wlan_tx_put(head, hdr, hlen);
 	if (dlen != 0) {
 		head = wlan_tx_put(head, data, dlen);
@@ -1120,7 +1123,7 @@ struct tftp_sess {
 	boolean_t has_wsize, has_timeout, has_tsize, has_rsize, has_seek;
 	uint32_t node, port, rport, size, blk, sent, wlen;
 	uint32_t wsize, timeout, rsize, seek;
-	uint32_t seq;
+	uint32_t seq, last_ms, last_ack;
 	char name[13];
 	char path[64];
 };
@@ -1132,7 +1135,8 @@ static uint8_t t_wr[64 * 1024];
 static uint32_t t_wr_len;
 static char t_wr_name[64];
 
-static void wlan_tftp_sess_rx(uint32_t port, const uint8_t *d, uint32_t len);
+static void wlan_tftp_sess_rx(uint32_t port, uint32_t src_port,
+    const uint8_t *d, uint32_t len);
 
 static void
 wlan_tftp_reply(struct tftp_sess *s, uint32_t n)
@@ -1188,6 +1192,7 @@ wlan_tftp_data(struct tftp_sess *s, uint32_t block)
 		    (s->size + s->blk - 1) / s->blk);
 	}
 	wlan_tftp_reply(s, 4 + n);
+	s->last_ms = g_ms;
 	if (block <= 3) {
 		printf("SWEET WLAN: tftp %s block %u -> q %u tx %u\n",
 		    s->name, block, q_pending_len, g_tx_msgs);
@@ -1347,7 +1352,7 @@ wlan_tftp_req(uint32_t node, uint32_t port, const uint8_t *d, uint32_t len)
 				    "server port, routed to %x\n", op,
 				    len >= 4 ? (d[2] << 8) | d[3] : 0,
 				    t_sess[i].port);
-				wlan_tftp_sess_rx(t_sess[i].port, d, len);
+				wlan_tftp_sess_rx(t_sess[i].port, port, d, len);
 				return;
 			}
 		}
@@ -1408,6 +1413,7 @@ wlan_tftp_req(uint32_t node, uint32_t port, const uint8_t *d, uint32_t len)
 	}
 	memset(s, 0, sizeof(*s));
 	s->seq = ++t_seq;
+	s->last_ms = g_ms;
 	s->node = node;
 	s->rport = port;
 	s->port = PORT_SESS_BASE + (uint32_t)(s - t_sess);
@@ -1558,7 +1564,8 @@ wlan_tftp_req(uint32_t node, uint32_t port, const uint8_t *d, uint32_t len)
 }
 
 static void
-wlan_tftp_sess_rx(uint32_t port, const uint8_t *d, uint32_t len)
+wlan_tftp_sess_rx(uint32_t port, uint32_t src_port, const uint8_t *d,
+    uint32_t len)
 {
 	struct tftp_sess *s = NULL;
 	uint16_t op, block;
@@ -1572,6 +1579,17 @@ wlan_tftp_sess_rx(uint32_t port, const uint8_t *d, uint32_t len)
 	if (s == NULL || len < 4) {
 		return;
 	}
+	/*
+	 * TFTP ties the reply to the client's TID; if the eloader moved to
+	 * a new socket after the OACK, follow it instead of answering the
+	 * RRQ source port forever.
+	 */
+	if (src_port != s->rport) {
+		printf("SWEET WLAN: tftp %s client port %x -> %x\n",
+		    s->name, s->rport, src_port);
+		s->rport = src_port;
+	}
+	s->last_ms = g_ms;
 	op = (uint16_t)((d[0] << 8) | d[1]);
 	block = (uint16_t)((d[2] << 8) | d[3]);
 	switch (op) {
@@ -1582,6 +1600,9 @@ wlan_tftp_sess_rx(uint32_t port, const uint8_t *d, uint32_t len)
 		if (block <= 20 || (block % 100) == 0) {
 			printf("SWEET WLAN: tftp %s ack %u (sent %u)\n",
 			    s->name, block, s->sent);
+		}
+		if (block >= s->last_ack) {
+			s->last_ack = block;    /* never move backwards */
 		}
 		/*
 		 * A queued DATA of this session is stale once its ACK
@@ -1635,6 +1656,31 @@ wlan_tftp_sess_rx(uint32_t port, const uint8_t *d, uint32_t len)
 		break;
 	default:
 		break;
+	}
+}
+
+/*
+ * TFTP retransmission timer: if a transfer has been silent for 1.5 s,
+ * resend the window from the last acknowledged block. Without this a
+ * lost ACK or a transient FIFO stall parks the download forever (0747
+ * stalled at block 800 and never asked again).
+ */
+static void
+wlan_tftp_tick(uint32_t ms)
+{
+	for (unsigned i = 0; i < TFTP_MAX_SESS; i++) {
+		struct tftp_sess *s = &t_sess[i];
+
+		if (!s->used || s->write || s->sent == 0) {
+			continue;       /* waiting for ACK 0: do not send early */
+		}
+		if (ms - s->last_ms < 1500) {
+			continue;
+		}
+		s->last_ms = ms;
+		printf("SWEET WLAN: tftp %s stall at %u (ack %u), resend\n",
+		    s->name, s->sent, s->last_ack);
+		wlan_tftp_window(s, s->last_ack + 1);
 	}
 }
 
@@ -2500,7 +2546,7 @@ wlan_svc_rx(uint32_t src_node, uint32_t src_port, uint32_t dst_port,
 	}
 	if (dst_port >= PORT_SESS_BASE &&
 	    dst_port < PORT_SESS_BASE + TFTP_MAX_SESS) {
-		wlan_tftp_sess_rx(dst_port, d, len);
+		wlan_tftp_sess_rx(dst_port, src_port, d, len);
 		return TRUE;
 	}
 	if (dst_port != PORT_PDM || len < 7 || d[0] != QMI_REQ) {
@@ -2680,23 +2726,37 @@ wlan_rx_one(void)
 		}
 		for (uint32_t i = 0; i < m.p2; i++) {
 			uint32_t pair[2];
+			unsigned k;
 
 			wlan_rx_peek(8 + 8 * i, pair, 8);
-			if (m.p1 == g_rcid &&
-			    g_ri_count < GLINK_MAX_INTENTS) {
+			if (m.p1 != g_rcid) {
+				continue;
+			}
+			/*
+			 * The modem re-announces an id when it reuses a
+			 * buffer; update that slot instead of appending a
+			 * duplicate, or the table fills with stale ids.
+			 */
+			for (k = 0; k < g_ri_count; k++) {
+				if (g_ri[k].id == pair[1]) {
+					g_ri[k].size = pair[0];
+					g_ri[k].used = FALSE;
+					break;
+				}
+			}
+			if (k == g_ri_count && g_ri_count < GLINK_MAX_INTENTS) {
 				g_ri[g_ri_count].size = pair[0];
 				g_ri[g_ri_count].id = pair[1];
 				g_ri[g_ri_count].used = FALSE;
-				if (pair[0] != g_last_intent_size) {
-					g_last_intent_size = pair[0];
-					printf("SWEET WLAN: glink intent %x "
-					    "bytes id %x\n", pair[0],
-					    pair[1]);
-				}
-				if (pair[0] > g_max_intent_size) {
-					g_max_intent_size = pair[0];
-				}
 				g_ri_count++;
+			}
+			if (pair[0] != g_last_intent_size) {
+				g_last_intent_size = pair[0];
+				printf("SWEET WLAN: glink intent %x bytes id %x\n",
+				    pair[0], pair[1]);
+			}
+			if (pair[0] > g_max_intent_size) {
+				g_max_intent_size = pair[0];
 			}
 		}
 		wlan_rx_advance(n);
@@ -2797,6 +2857,7 @@ static void
 wlan_glink_poll(unsigned ms)
 {
 	g_ms = ms;
+	wlan_tftp_tick(ms);
 	if (g_desc != NULL) {
 		uint32_t d0 = g_desc[0], d1 = g_desc[1], d2 = g_desc[2];
 		uint32_t d3 = g_desc[3];
