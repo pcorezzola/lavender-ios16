@@ -607,10 +607,13 @@ cam_smmu(void)
 #define CAM_SPMI_STRIDE         0x8000u
 #define CAM_SPMI_NO_APID        0xffffu
 
-/* PM660L (SID 2) camera@0 VDIG pad, and the qpnp-pin register offsets. */
+/* PM660L (SID 2) camera@0 VDIG pad, and the qpnp-pin register offsets
+ * pinctrl-spmi-gpio.c uses (there is no 0x08 STATUS on this peripheral). */
 #define CAM_PM660L_SID          2u
 #define CAM_PM660L_DVDD0        0x00c2u          /* pad 3 -> 0xc000 + 2*0x100 */
-#define CAM_PMIC_GPIO_STATUS    0x08u
+#define CAM_PMIC_GPIO_TYPE      0x04u
+#define CAM_PMIC_GPIO_TYPE_GPIO 0x10u
+#define CAM_PMIC_GPIO_RT_STS    0x10u            /* bit0: digital input level */
 #define CAM_PMIC_GPIO_MODE      0x40u            /* bit0 out, 3:1 fun, 6:4 dir */
 #define CAM_PMIC_GPIO_VIN       0x41u
 #define CAM_PMIC_GPIO_EN        0x46u            /* bit7 master enable */
@@ -630,7 +633,7 @@ cam_smmu(void)
 extern void ml_io_unmap(vm_offset_t, vm_size_t);
 
 struct cam_pad {
-	uint8_t status, mode, vin, en;
+	uint8_t type, rtsts, mode, vin, en;
 };
 
 static vm_offset_t spmi_core;
@@ -814,31 +817,45 @@ static int
 cam_pad_save(uint8_t sid, uint16_t periph, struct cam_pad *pad)
 {
 	uint8_t *p = (uint8_t *)pad;
-	static const uint8_t offs[] = { CAM_PMIC_GPIO_STATUS,
-	    CAM_PMIC_GPIO_MODE, CAM_PMIC_GPIO_VIN, CAM_PMIC_GPIO_EN };
+	static const uint8_t offs[] = { CAM_PMIC_GPIO_TYPE,
+	    CAM_PMIC_GPIO_RT_STS, CAM_PMIC_GPIO_MODE, CAM_PMIC_GPIO_VIN,
+	    CAM_PMIC_GPIO_EN };
 	unsigned i;
 
-	for (i = 0; i < 4; i++) {
+	for (i = 0; i < 5; i++) {
 		if (cam_spmi_read(sid, (uint16_t)((periph << 8) | offs[i]),
 		    &p[i]) != 0) {
 			return EIO;
 		}
 	}
-	printf("SWEET CAM: pm660l pad %#x as found: status %02x mode %02x "
-	    "vin %02x en %02x\n", periph, pad->status, pad->mode, pad->vin,
-	    pad->en);
+	printf("SWEET CAM: pm660l pad %#x as found: type %02x rt_sts %02x "
+	    "mode %02x vin %02x en %02x\n", periph, pad->type, pad->rtsts,
+	    pad->mode, pad->vin, pad->en);
+	if (pad->type != CAM_PMIC_GPIO_TYPE_GPIO) {
+		printf("SWEET CAM: pm660l pad %#x is not a GPIO (type %02x, "
+		    "want %02x); not touched\n", periph, pad->type,
+		    CAM_PMIC_GPIO_TYPE_GPIO);
+		return EIO;
+	}
 	return 0;
 }
 
 static int
 cam_pad_drive(uint8_t sid, uint16_t periph, int high)
 {
+	uint8_t level = 0;
+
 	if (cam_pad_write(sid, periph, CAM_PMIC_GPIO_VIN, 0x00, "vin") != 0 ||
 	    cam_pad_write(sid, periph, CAM_PMIC_GPIO_MODE, high ?
 	    CAM_PMIC_GPIO_OUT_HIGH : 0x10u, "mode") != 0 ||
 	    cam_pad_write(sid, periph, CAM_PMIC_GPIO_EN,
 	    (uint8_t)(cam_dvdd.en | CAM_PMIC_GPIO_EN_BIT), "en") != 0) {
 		return EIO;
+	}
+	if (cam_spmi_read(sid, (uint16_t)((periph << 8) |
+	    CAM_PMIC_GPIO_RT_STS), &level) == 0) {
+		printf("SWEET CAM: pm660l pad %#x rt_sts %02x after driving it "
+		    "%s\n", periph, level, high ? "high" : "low");
 	}
 	return 0;
 }
