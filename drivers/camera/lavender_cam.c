@@ -13,6 +13,11 @@
  *                   branches), read the CSI clock muxes and the CSIPHY
  *                   register interfaces, and switch back off exactly what
  *                   this probe switched on
+ *   lvcam=3         ... and power camera@0 (reset low, VANA on gpio46, VDIG
+ *                   on PM660L pad 3, reset high) and walk the sensor bus by
+ *                   hand on the CCI pins, printing every address that answers
+ *                   and the two chip IDs it can read; the rails go off again
+ *                   afterwards. Only camera@0 (lvcamsel=0) in this build.
  *   lvcamdelay=S    seconds to wait after boot before the probe (default 25),
  *                   so the console ring flusher and the USB live log are up
  *   lvcamsel=0/1/2  the camera the driver works on from F1 on: 0 the rear
@@ -568,6 +573,588 @@ cam_smmu(void)
 	    idr0 & 0xffu, idr1, idr1 & 0xffu, (idr1 >> 16) & 0xffu, s2cr0);
 }
 
+/*
+ * ---------------------------------------------------------------------------
+ * F1 (lvcam=3): the camera@0 rails, its reset and the sensor bus.
+ *
+ * The rails are not LDOs written through SPMI: in the DTB cam_vana is a fixed
+ * 2.8 V regulator switched by TLMM gpio46, cam_vdig is a fixed 1.35 V
+ * regulator switched by the PM660L's own GPIO3 (SPMI SID 2, pad 0xc2; the
+ * consumer cell is 3, and qpnp-pin numbers pads from 1), and cam_vio is
+ * pm660_l11, an RPM-controlled LDO the bootloader already votes (it is shared
+ * with other peripherals). The sensor's reset is TLMM gpio48, active low; the
+ * DTB's power sequence is reset low, VANA, VDIG, VIO, MCLK, reset high.
+ *
+ * The sensor bus is driven by hand on the CCI's pins, the way the hakios port
+ * does it: gpio36 (SDA) and gpio37 (SCL) of CCI master 0 are taken as plain
+ * GPIOs, open drain emulated with the internal pull-up (high = input with
+ * pull-up, low = output 0; 5 us per half bit, 100 kHz), clock stretching
+ * honoured, and the pins given back exactly as they were found. A bus held
+ * down by a sensor that stopped mid-byte is unwedged with nine clocks, as
+ * Linux's bit-banged master does. This reads the chip IDs of whatever answers
+ * without programming the CCI block.
+ *
+ * The SPMI protocol (arbiter v2/v3, APID map at core+0x800, observer channels
+ * for reads, RW channels for writes, APPS-owned APIDs only) is the one the
+ * audio driver verified on this phone; it lives here so the camera probe does
+ * not touch that shared file.
+ */
+#define CAM_SPMI_CORE_PA        0x0800f000u
+#define CAM_SPMI_CHNLS_PA       0x08400000u      /* RW channels */
+#define CAM_SPMI_OBS_PA         0x09400000u      /* observer (read) channels */
+#define CAM_SPMI_CFG_PA         0x0800a000u
+#define CAM_SPMI_APID_MAP       0x800u
+#define CAM_SPMI_STRIDE         0x8000u
+#define CAM_SPMI_NO_APID        0xffffu
+
+/* PM660L (SID 2) camera@0 VDIG pad, and the qpnp-pin register offsets. */
+#define CAM_PM660L_SID          2u
+#define CAM_PM660L_DVDD0        0x00c2u          /* pad 3 -> 0xc000 + 2*0x100 */
+#define CAM_PMIC_GPIO_STATUS    0x08u
+#define CAM_PMIC_GPIO_MODE      0x40u            /* bit0 out, 3:1 fun, 6:4 dir */
+#define CAM_PMIC_GPIO_VIN       0x41u
+#define CAM_PMIC_GPIO_EN        0x46u            /* bit7 master enable */
+#define CAM_PMIC_GPIO_EN_BIT    0x80u
+#define CAM_PMIC_GPIO_OUT_HIGH  0x11u            /* dir out (1<<4) | value */
+
+/* TLMM bit layout of an sdm660 pad (see the top of the file). */
+#define CAM_TLMM_OE             (1u << 9)
+#define CAM_TLMM_PULL_UP        0x3u
+#define CAM_TLMM_OUT_HIGH       0x2u             /* IO bit 1 = output value */
+
+#define CAM_GPIO_RESET0         48u              /* camera@0 reset, low active */
+#define CAM_GPIO_AVDD0          46u              /* camera@0 cam_vana, high */
+#define CAM_GPIO_CCI_SDA0       36u              /* CCI master 0 data */
+#define CAM_GPIO_CCI_SCL0       37u              /* CCI master 0 clock */
+
+extern void ml_io_unmap(vm_offset_t, vm_size_t);
+
+struct cam_pad {
+	uint8_t status, mode, vin, en;
+};
+
+static vm_offset_t spmi_core;
+static int spmi_ready;
+static uint32_t cam_avdd_cfg, cam_avdd_io, cam_rst_cfg, cam_rst_io;
+static uint32_t cam_sda_cfg, cam_sda_io, cam_scl_cfg, cam_scl_io;
+static struct cam_pad cam_dvdd;
+static int cam_dvdd_saved;
+static int cam_rails_on;
+
+/* A short busy wait: the bit-banged bus needs microseconds, cam_wait() has
+ * the thread sleep for whole milliseconds. */
+static void
+cam_spin_us(uint32_t us)
+{
+	uint64_t until;
+
+	nanoseconds_to_absolutetime((uint64_t)us * NSEC_PER_USEC, &until);
+	until += mach_absolute_time();
+	while (mach_absolute_time() < until) {
+	}
+}
+
+static int
+cam_spmi_init(void)
+{
+	uint32_t version;
+
+	if (spmi_ready) {
+		return 0;
+	}
+	spmi_core = ml_io_map(CAM_SPMI_CORE_PA, 0x1000);
+	if (spmi_core == 0) {
+		printf("SWEET CAM: SPMI core map failed\n");
+		return EIO;
+	}
+	version = cam_rd(spmi_core, 0);
+	if (version < 0x20000000u || version >= 0x50000000u) {
+		printf("SWEET CAM: SPMI arbiter %#x unsupported\n", version);
+		return EIO;
+	}
+	spmi_ready = 1;
+	printf("SWEET CAM: SPMI arbiter %#x\n", version);
+	return 0;
+}
+
+/* PPID = (sid << 8) | peripheral, found in the 512-entry APID map. */
+static uint16_t
+cam_spmi_apid(unsigned sid, unsigned periph)
+{
+	uint32_t apid;
+
+	for (apid = 0; apid < 512u; apid++) {
+		uint32_t map = cam_rd(spmi_core, CAM_SPMI_APID_MAP + 4u * apid);
+
+		if (map != 0 && ((map >> 8) & 0xfffu) ==
+		    ((sid << 8) | periph)) {
+			return (uint16_t)apid;
+		}
+	}
+	return CAM_SPMI_NO_APID;
+}
+
+static int
+cam_spmi_read(uint8_t sid, uint16_t addr, uint8_t *out)
+{
+	uint16_t apid;
+	vm_offset_t chan;
+	uint32_t cmd, status;
+	unsigned i;
+
+	if (cam_spmi_init() != 0) {
+		return EIO;
+	}
+	apid = cam_spmi_apid(sid, addr >> 8);
+	if (apid == CAM_SPMI_NO_APID) {
+		printf("SWEET CAM: SPMI sid %u periph %#x has no APID\n", sid,
+		    addr >> 8);
+		return EIO;
+	}
+	chan = ml_io_map(CAM_SPMI_OBS_PA + CAM_SPMI_STRIDE * apid, 0x1000);
+	if (chan == 0) {
+		return EIO;
+	}
+	cmd = (1u << 27) | ((addr & 0xffu) << 4);       /* EXT_READL */
+	cam_wr(chan, 0x00, cmd);
+	for (i = 0; i < 1000; i++) {
+		status = cam_rd(chan, 0x08);
+		if (status & 1u) {
+			if (status & 0x0eu) {
+				printf("SWEET CAM: SPMI read error %08x addr "
+				    "%#x\n", status, addr);
+				ml_io_unmap(chan, 0x1000);
+				return EIO;
+			}
+			*out = (uint8_t)cam_rd(chan, 0x18);
+			ml_io_unmap(chan, 0x1000);
+			return 0;
+		}
+		cam_wait(1);
+	}
+	printf("SWEET CAM: SPMI read timeout addr %#x\n", addr);
+	ml_io_unmap(chan, 0x1000);
+	return ETIMEDOUT;
+}
+
+/* Writes are only allowed where the APID belongs to APPS (EE 0). */
+static int
+cam_spmi_write(uint8_t sid, uint16_t addr, uint8_t val)
+{
+	uint16_t apid;
+	vm_offset_t cfg, chan;
+	uint32_t cmd, status;
+	unsigned i;
+
+	if (cam_spmi_init() != 0) {
+		return EIO;
+	}
+	apid = cam_spmi_apid(sid, addr >> 8);
+	if (apid == CAM_SPMI_NO_APID) {
+		printf("SWEET CAM: SPMI sid %u periph %#x has no APID\n", sid,
+		    addr >> 8);
+		return EIO;
+	}
+	cfg = ml_io_map(CAM_SPMI_CFG_PA, 0x1000);
+	if (cfg == 0) {
+		return EIO;
+	}
+	if ((cam_rd(cfg, 0x700u + 4u * apid) & 0x7u) != 0) {
+		printf("SWEET CAM: SPMI APID %u is not APPS-owned\n", apid);
+		ml_io_unmap(cfg, 0x1000);
+		return EACCES;
+	}
+	ml_io_unmap(cfg, 0x1000);
+	chan = ml_io_map(CAM_SPMI_CHNLS_PA + CAM_SPMI_STRIDE * apid, 0x1000);
+	if (chan == 0) {
+		return EIO;
+	}
+	cam_wr(chan, 0x10, val);                        /* WDATA0 */
+	cmd = (0u << 27) | ((addr & 0xffu) << 4);       /* EXT_WRITEL */
+	cam_wr(chan, 0x00, cmd);
+	for (i = 0; i < 1000; i++) {
+		status = cam_rd(chan, 0x08);
+		if (status & 1u) {
+			if (status & 0x0eu) {
+				printf("SWEET CAM: SPMI write error %08x addr "
+				    "%#x\n", status, addr);
+				ml_io_unmap(chan, 0x1000);
+				return EIO;
+			}
+			ml_io_unmap(chan, 0x1000);
+			return 0;
+		}
+		cam_wait(1);
+	}
+	printf("SWEET CAM: SPMI write timeout addr %#x\n", addr);
+	ml_io_unmap(chan, 0x1000);
+	return ETIMEDOUT;
+}
+
+/* One PMIC GPIO register write, read back. */
+static int
+cam_pad_write(uint8_t sid, uint16_t periph, uint32_t off, uint8_t val,
+    const char *what)
+{
+	uint8_t back = 0;
+
+	if (cam_spmi_write(sid, (uint16_t)((periph << 8) | off), val) != 0) {
+		return EIO;
+	}
+	if (cam_spmi_read(sid, (uint16_t)((periph << 8) | off), &back) == 0 &&
+	    back != val) {
+		printf("SWEET CAM: pm660l %s wrote %02x read back %02x\n", what,
+		    val, back);
+		return EIO;
+	}
+	return 0;
+}
+
+static int
+cam_pad_save(uint8_t sid, uint16_t periph, struct cam_pad *pad)
+{
+	uint8_t *p = (uint8_t *)pad;
+	static const uint8_t offs[] = { CAM_PMIC_GPIO_STATUS,
+	    CAM_PMIC_GPIO_MODE, CAM_PMIC_GPIO_VIN, CAM_PMIC_GPIO_EN };
+	unsigned i;
+
+	for (i = 0; i < 4; i++) {
+		if (cam_spmi_read(sid, (uint16_t)((periph << 8) | offs[i]),
+		    &p[i]) != 0) {
+			return EIO;
+		}
+	}
+	printf("SWEET CAM: pm660l pad %#x as found: status %02x mode %02x "
+	    "vin %02x en %02x\n", periph, pad->status, pad->mode, pad->vin,
+	    pad->en);
+	return 0;
+}
+
+static int
+cam_pad_drive(uint8_t sid, uint16_t periph, int high)
+{
+	if (cam_pad_write(sid, periph, CAM_PMIC_GPIO_VIN, 0x00, "vin") != 0 ||
+	    cam_pad_write(sid, periph, CAM_PMIC_GPIO_MODE, high ?
+	    CAM_PMIC_GPIO_OUT_HIGH : 0x10u, "mode") != 0 ||
+	    cam_pad_write(sid, periph, CAM_PMIC_GPIO_EN,
+	    (uint8_t)(cam_dvdd.en | CAM_PMIC_GPIO_EN_BIT), "en") != 0) {
+		return EIO;
+	}
+	return 0;
+}
+
+static void
+cam_pad_restore(uint8_t sid, uint16_t periph, const struct cam_pad *pad)
+{
+	(void)cam_pad_write(sid, periph, CAM_PMIC_GPIO_VIN, pad->vin, "vin");
+	(void)cam_pad_write(sid, periph, CAM_PMIC_GPIO_MODE, pad->mode, "mode");
+	(void)cam_pad_write(sid, periph, CAM_PMIC_GPIO_EN, pad->en, "en");
+}
+
+/* Drive one TLMM pin as a plain GPIO (function 0, 2 mA, no pull). */
+static void
+cam_tlmm_drive(uint32_t pin, int high)
+{
+	cam_wr(tlmm, pin * 0x1000u + 4u,
+	    high ? CAM_TLMM_OUT_HIGH : 0u);
+	cam_wr(tlmm, pin * 0x1000u, CAM_TLMM_OE);
+}
+
+/*
+ * The camera@0 rail sequence of the DTB: reset low while the rails come up,
+ * then VANA (TLMM gpio46), VDIG (PM660L pad 3), and the reset released 5 ms
+ * later; the sensor's I2C answers without MCLK, so no clock is programmed in
+ * this step.
+ */
+static int
+cam_f1_rails_up(void)
+{
+	int err;
+
+	if (cam_sel != 0) {
+		printf("SWEET CAM: lvcam>=3 drives camera@0 only (lvcamsel=0)\n");
+		return EINVAL;
+	}
+	cam_announce("power camera@0: reset low, VANA, VDIG, reset high");
+	cam_avdd_cfg = cam_rd(tlmm, CAM_GPIO_AVDD0 * 0x1000u);
+	cam_avdd_io = cam_rd(tlmm, CAM_GPIO_AVDD0 * 0x1000u + 4u);
+	cam_rst_cfg = cam_rd(tlmm, CAM_GPIO_RESET0 * 0x1000u);
+	cam_rst_io = cam_rd(tlmm, CAM_GPIO_RESET0 * 0x1000u + 4u);
+	printf("SWEET CAM: gpio%u avdd cfg %08x io %08x, gpio%u reset cfg %08x "
+	    "io %08x\n", CAM_GPIO_AVDD0, cam_avdd_cfg, cam_avdd_io,
+	    CAM_GPIO_RESET0, cam_rst_cfg, cam_rst_io);
+
+	cam_tlmm_drive(CAM_GPIO_RESET0, 0);
+	cam_tlmm_drive(CAM_GPIO_AVDD0, 1);
+	cam_dvdd_saved = cam_pad_save(CAM_PM660L_SID, CAM_PM660L_DVDD0,
+	    &cam_dvdd) == 0;
+	if (!cam_dvdd_saved) {
+		printf("SWEET CAM: pm660l pad read failed; VDIG cannot be "
+		    "driven, aborting the rails\n");
+		cam_tlmm_drive(CAM_GPIO_AVDD0, 0);
+		cam_wr(tlmm, CAM_GPIO_AVDD0 * 0x1000u + 4u, cam_avdd_io);
+		cam_wr(tlmm, CAM_GPIO_AVDD0 * 0x1000u, cam_avdd_cfg);
+		cam_wr(tlmm, CAM_GPIO_RESET0 * 0x1000u + 4u, cam_rst_io);
+		cam_wr(tlmm, CAM_GPIO_RESET0 * 0x1000u, cam_rst_cfg);
+		return EIO;
+	}
+	err = cam_pad_drive(CAM_PM660L_SID, CAM_PM660L_DVDD0, 1);
+	if (err != 0) {
+		printf("SWEET CAM: VDIG did not take (%d); powering down\n",
+		    err);
+		cam_tlmm_drive(CAM_GPIO_RESET0, 0);
+		cam_wr(tlmm, CAM_GPIO_AVDD0 * 0x1000u + 4u, cam_avdd_io);
+		cam_wr(tlmm, CAM_GPIO_AVDD0 * 0x1000u, cam_avdd_cfg);
+		cam_wr(tlmm, CAM_GPIO_RESET0 * 0x1000u + 4u, cam_rst_io);
+		cam_wr(tlmm, CAM_GPIO_RESET0 * 0x1000u, cam_rst_cfg);
+		cam_pad_restore(CAM_PM660L_SID, CAM_PM660L_DVDD0, &cam_dvdd);
+		return err;
+	}
+	cam_wait(5);
+	cam_tlmm_drive(CAM_GPIO_RESET0, 1);
+	cam_wait(10);
+	cam_rails_on = 1;
+	printf("SWEET CAM: camera@0 powered (reset released)\n");
+	return 0;
+}
+
+static void
+cam_f1_rails_down(void)
+{
+	if (!cam_rails_on) {
+		return;
+	}
+	cam_announce("power camera@0 down (reset low, rails off)");
+	cam_tlmm_drive(CAM_GPIO_RESET0, 0);
+	cam_wait(1);
+	if (cam_dvdd_saved) {
+		cam_pad_restore(CAM_PM660L_SID, CAM_PM660L_DVDD0, &cam_dvdd);
+	}
+	cam_wr(tlmm, CAM_GPIO_AVDD0 * 0x1000u + 4u, cam_avdd_io);
+	cam_wr(tlmm, CAM_GPIO_AVDD0 * 0x1000u, cam_avdd_cfg);
+	cam_wr(tlmm, CAM_GPIO_RESET0 * 0x1000u + 4u, cam_rst_io);
+	cam_wr(tlmm, CAM_GPIO_RESET0 * 0x1000u, cam_rst_cfg);
+	cam_rails_on = 0;
+}
+
+/* Open drain on the CCI pins: high is input with the internal pull-up. */
+static void
+cam_i2c_line(uint32_t pin, int high)
+{
+	cam_wr(tlmm, pin * 0x1000u + 4u, 0);
+	cam_wr(tlmm, pin * 0x1000u, CAM_TLMM_PULL_UP |
+	    (high ? 0u : CAM_TLMM_OE));
+}
+
+static int
+cam_i2c_level(uint32_t pin)
+{
+	return (cam_rd(tlmm, pin * 0x1000u + 4u) & 1u) != 0;
+}
+
+static void
+cam_i2c_half(void)
+{
+	cam_spin_us(5);
+}
+
+static void
+cam_i2c_start(void)
+{
+	cam_i2c_line(CAM_GPIO_CCI_SDA0, 1);
+	cam_i2c_line(CAM_GPIO_CCI_SCL0, 1);
+	cam_i2c_half();
+	cam_i2c_line(CAM_GPIO_CCI_SDA0, 0);
+	cam_i2c_half();
+	cam_i2c_line(CAM_GPIO_CCI_SCL0, 0);
+	cam_i2c_half();
+}
+
+static void
+cam_i2c_stop(void)
+{
+	cam_i2c_line(CAM_GPIO_CCI_SDA0, 0);
+	cam_i2c_half();
+	cam_i2c_line(CAM_GPIO_CCI_SCL0, 1);
+	cam_i2c_half();
+	cam_i2c_line(CAM_GPIO_CCI_SDA0, 1);
+	cam_i2c_half();
+}
+
+/* One bit; returns the level the slave put on SDA (ack/read data). */
+static int
+cam_i2c_bit(int out)
+{
+	int in;
+
+	cam_i2c_line(CAM_GPIO_CCI_SDA0, out);
+	cam_i2c_half();
+	cam_i2c_line(CAM_GPIO_CCI_SCL0, 1);
+	for (unsigned stretched = 0; !cam_i2c_level(CAM_GPIO_CCI_SCL0) &&
+	    stretched < 100; stretched++) {
+		cam_i2c_half();
+	}
+	cam_i2c_half();
+	in = cam_i2c_level(CAM_GPIO_CCI_SDA0);
+	cam_i2c_line(CAM_GPIO_CCI_SCL0, 0);
+	return in;
+}
+
+static int
+cam_i2c_write(uint8_t byte)
+{
+	int bit;
+
+	for (bit = 7; bit >= 0; bit--) {
+		cam_i2c_bit((byte >> bit) & 1);
+	}
+	return !cam_i2c_bit(1);
+}
+
+static uint8_t
+cam_i2c_read(int more)
+{
+	uint8_t byte = 0;
+	int bit;
+
+	for (bit = 7; bit >= 0; bit--) {
+		byte = (uint8_t)(byte << 1 | cam_i2c_bit(1));
+	}
+	cam_i2c_bit(!more);
+	return byte;
+}
+
+/* Nine clocks free a bus whose data line a sensor is still holding down. */
+static int
+cam_i2c_unwedge(void)
+{
+	unsigned clocks;
+
+	for (clocks = 1; clocks <= 9; clocks++) {
+		cam_i2c_line(CAM_GPIO_CCI_SCL0, 0);
+		cam_i2c_half();
+		cam_i2c_line(CAM_GPIO_CCI_SCL0, 1);
+		cam_i2c_half();
+		if (cam_i2c_level(CAM_GPIO_CCI_SDA0)) {
+			cam_i2c_stop();
+			printf("SWEET CAM: i2c data line came back after %u "
+			    "clock(s)\n", clocks);
+			return 0;
+		}
+	}
+	return EIO;
+}
+
+static int
+cam_i2c_take(void)
+{
+	cam_sda_cfg = cam_rd(tlmm, CAM_GPIO_CCI_SDA0 * 0x1000u);
+	cam_sda_io = cam_rd(tlmm, CAM_GPIO_CCI_SDA0 * 0x1000u + 4u);
+	cam_scl_cfg = cam_rd(tlmm, CAM_GPIO_CCI_SCL0 * 0x1000u);
+	cam_scl_io = cam_rd(tlmm, CAM_GPIO_CCI_SCL0 * 0x1000u + 4u);
+	printf("SWEET CAM: i2c take sda gpio%u cfg %08x io %08x, scl gpio%u "
+	    "cfg %08x io %08x\n", CAM_GPIO_CCI_SDA0, cam_sda_cfg, cam_sda_io,
+	    CAM_GPIO_CCI_SCL0, cam_scl_cfg, cam_scl_io);
+	cam_i2c_line(CAM_GPIO_CCI_SDA0, 1);
+	cam_i2c_line(CAM_GPIO_CCI_SCL0, 1);
+	cam_i2c_half();
+	if (cam_i2c_level(CAM_GPIO_CCI_SDA0) &&
+	    cam_i2c_level(CAM_GPIO_CCI_SCL0)) {
+		return 0;
+	}
+	if (cam_i2c_level(CAM_GPIO_CCI_SCL0) &&
+	    !cam_i2c_level(CAM_GPIO_CCI_SDA0) && cam_i2c_unwedge() == 0 &&
+	    cam_i2c_level(CAM_GPIO_CCI_SCL0)) {
+		return 0;
+	}
+	printf("SWEET CAM: i2c bus is not at rest (sda %u scl %u): not "
+	    "touched\n", cam_i2c_level(CAM_GPIO_CCI_SDA0),
+	    cam_i2c_level(CAM_GPIO_CCI_SCL0));
+	return EIO;
+}
+
+static void
+cam_i2c_give(void)
+{
+	cam_wr(tlmm, CAM_GPIO_CCI_SDA0 * 0x1000u + 4u, cam_sda_io);
+	cam_wr(tlmm, CAM_GPIO_CCI_SCL0 * 0x1000u + 4u, cam_scl_io);
+	cam_wr(tlmm, CAM_GPIO_CCI_SDA0 * 0x1000u, cam_sda_cfg);
+	cam_wr(tlmm, CAM_GPIO_CCI_SCL0 * 0x1000u, cam_scl_cfg);
+}
+
+/* Write the out bytes, then read in_count after a repeated start. */
+static int
+cam_i2c_xfer(uint8_t address, const uint8_t *out, unsigned out_count,
+    uint8_t *in, unsigned in_count)
+{
+	int answered;
+	unsigned i;
+
+	cam_i2c_start();
+	answered = cam_i2c_write((uint8_t)(address << 1));
+	for (i = 0; answered && i < out_count; i++) {
+		answered = cam_i2c_write(out[i]);
+	}
+	if (answered && in_count != 0) {
+		cam_i2c_start();
+		answered = cam_i2c_write((uint8_t)(address << 1 | 1));
+		for (i = 0; answered && i < in_count; i++) {
+			in[i] = cam_i2c_read(i + 1 < in_count);
+		}
+	}
+	cam_i2c_stop();
+	return answered ? 0 : EIO;
+}
+
+static void
+cam_f1_scan(void)
+{
+	uint8_t id[2];
+	uint8_t reg[2];
+	uint32_t addr;
+	unsigned found = 0;
+
+	cam_announce("scan the camera bus by hand on the CCI pins (lvcam>=3)");
+	if (cam_i2c_take() != 0) {
+		cam_i2c_give();
+		return;
+	}
+	for (addr = 0x08; addr < 0x78; addr++) {
+		uint8_t one = 0;
+
+		if (cam_i2c_xfer((uint8_t)addr, NULL, 0, &one, 1) != 0) {
+			continue;
+		}
+		found++;
+		printf("SWEET CAM: i2c 0x%02x answers (a read gives %02x)\n",
+		    addr, one);
+		reg[0] = 0x00;
+		reg[1] = 0x00;
+		if (cam_i2c_xfer((uint8_t)addr, reg, 2, id, 2) == 0) {
+			printf("SWEET CAM:   0x0000 = %02x %02x\n", id[0],
+			    id[1]);
+		}
+		reg[0] = 0x30;
+		reg[1] = 0x0a;
+		if (cam_i2c_xfer((uint8_t)addr, reg, 2, id, 2) == 0) {
+			printf("SWEET CAM:   0x300a = %02x %02x\n", id[0],
+			    id[1]);
+		}
+	}
+	cam_i2c_give();
+	printf("SWEET CAM: scan done, %u address(es) answered\n", found);
+}
+
+static void
+cam_f1(void)
+{
+	if (cam_f1_rails_up() != 0) {
+		return;
+	}
+	cam_f1_scan();
+	cam_f1_rails_down();
+}
+
 static void
 lavender_cam_thread(__unused void *arg, __unused wait_result_t wr)
 {
@@ -630,6 +1217,9 @@ lavender_cam_thread(__unused void *arg, __unused wait_result_t wr)
 	tlmm = ml_io_map(CAM_TLMM_SOUTH_PA, CAM_TLMM_SOUTH_SIZE);
 	if (tlmm != 0) {
 		cam_gpios();
+		if (cam_step >= 3) {
+			cam_f1();
+		}
 	} else {
 		printf("SWEET CAM: TLMM map failed\n");
 	}

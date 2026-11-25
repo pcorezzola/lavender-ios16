@@ -42,7 +42,7 @@ ofilm y sunny); el que trae **esta** unidad se decide leyendo su chip ID en F1.
 |---|---|---|
 | F0 | Sonda de solo lectura (`lvcam=1`, parche 1001): dominios, ramas de reloj, MMPLL10 y RCG de MMCC, pines de cámara en TLMM, identidad del SMMU | ✅ COMPLETA (2026-11-25) |
 | F0b | Encendido de `camss_top` y las ramas AHB, muxes de reloj CSI e interfaces de registro del CSIPHY, apagado de lo encendido (`lvcam=2`, parche 1001) | ⬜ PENDIENTE |
-| F1 | CCI: reloj, reset, timings del DTB y transacciones; rails, MCLK y secuencia de encendido del sensor; **chip ID** (`~1010`) | ⬜ PENDIENTE |
+| F1 | Rails de `camera@0` (VANA en gpio46, VDIG en el pad 3 del PM660L, reset gpio48) y **escaneo I2C por software** sobre los pines del CCI (`lvcam=3`, parche 1010); el bloque CCI no se programa | ⬜ PENDIENTE |
 | F2 | Patrón de test del CSID → VFE (RDI) → frame en memoria, sin sensor (`~1020`) | ⬜ PENDIENTE |
 | F3 | Stream real del sensor → CSIPHY → frame RAW (`~1030`) | ⬜ PENDIENTE |
 | F4 | IPIF + VFE en el camino, formato útil (`~1040`) | ⬜ PENDIENTE |
@@ -104,10 +104,19 @@ Resultados del teléfono (2026-11-25, shim `cam-readonly-1001`, log en
 
 ## F1 y siguientes
 
-Detalle de registros, orden de escritura y referencias (`msm_cci.c` del kernel
-de Xiaomi, mainline `camss-*`): el brief del agente
-(`work/briefs/camera-sdm660-brief.md`) y el handoff
-(`research/cam-refs/HANDOFF-CAM-F0F1.md`).
+`lvcam=3` (parche 1010) no programa el CCI: con los pines 36/37 tomados como
+GPIO (open drain con el pull-up interno, 100 kHz, clock stretching y desatasco
+de nueve clocks) lee el chip ID de lo que conteste en el bus, después de
+encender los rails en el orden de la DTB. Los rails de `camera@0` no son LDOs
+por SPMI: VANA es un fijo de 2,8 V conmutado por el GPIO 46 del TLMM, VDIG un
+fijo de 1,35 V conmutado por el GPIO 3 del PM660L (SPMI SID 2, pad `0xc2`), y
+VIO es `pm660_l11`, un LDO del RPM que el bootloader ya vota. El SPMI propio de
+la sonda usa el mismo protocolo que el driver de audio verificó (arbiter
+`0x0800f000`, APID map, canales observer/RW y APIDs de APPS).
+
+Registros y referencias (`msm_cci.c` del kernel de Xiaomi, mainline
+`camss-*`): el brief del agente (`work/briefs/camera-sdm660-brief.md`) y el
+handoff (`research/cam-refs/HANDOFF-CAM-F0F1.md`).
 
 ## Coordinación entre agentes
 
