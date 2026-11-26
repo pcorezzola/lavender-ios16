@@ -54,6 +54,7 @@
  *                   media format and run it
  *   lavaud=13       also map a 16 KiB tone buffer and write it with ASM
  *   lavaud=14       also enable the PM660L speaker PA/boost path
+ *   lavaud=15       read the PM660L clock/PA state and the LPASS MCLK (no writes)
  *   lavaudforce=1   A3: load even if SMEM shows an ADSP from an earlier run
  *   lavaudcopy=0    A3: skip the segment copy (test a preloaded carve-out)
  *   lavaudprobe=1   A3: read the carve-out and print copy progress every 256K
@@ -2805,7 +2806,7 @@ pm660l_update(uint16_t reg, uint8_t mask, uint8_t val)
 static void
 audio_pm660l_speaker(void)
 {
-	if (audio_step < 14) {
+	if (audio_step != 14) {
 		return;
 	}
 	audio_announce("PM660L speaker PA and boost enable");
@@ -2818,6 +2819,35 @@ audio_pm660l_speaker(void)
 	(void)pm660l_update(0x01b2, 0xef, 0xef);   /* SPKR_DRV_CTL */
 	(void)pm660l_update(0x01b2, 0x80, 0x80);   /* SPK PA enable */
 	printf("SWEET AUDIO: PM660L speaker PA writes done\n");
+}
+
+/*
+ * F4 read-only: the PM660L clock-block and speaker registers plus the LPASS
+ * MCLK/pinctrl state, so the next write sequence is based on what is on.
+ */
+static void
+audio_pm660l_state(void)
+{
+	static const uint16_t regs[] = {
+		0x0046, 0x0048, 0x0049, 0x0146, 0x01b0, 0x01b2,
+		0x01b5, 0x019e, 0x01c3, 0x01c0, 0x01c1,
+	};
+
+	if (audio_step < 15) {
+		return;
+	}
+	audio_announce("PM660L clock/PA state (read only)");
+	for (uint32_t i = 0; i < sizeof(regs) / sizeof(regs[0]); i++) {
+		uint8_t v = 0;
+		int err = sweet_spmi_lavender_read(3, 0xf000u + regs[i],
+		    &v);
+
+		printf("SWEET AUDIO: PM660L state[%04x] = %02x (%d)\n",
+		    regs[i], v, err);
+		audio_wait(10);
+	}
+	printf("SWEET AUDIO: LPASS mclk 0x15020018 = %08x pinctrl 0x0 "
+	    "= %08x\n", audio_rd(mclk, 0x18), audio_rd(pinctrl, 0x0));
 }
 
 /*
@@ -3249,6 +3279,9 @@ lavender_audio_thread(__unused void *arg, __unused wait_result_t wr)
 	}
 	if (audio_step >= 13) {
 		audio_asm_tone();
+	}
+	if (audio_step >= 15) {
+		audio_pm660l_state();
 	}
 
 	printf("SWEET AUDIO: probe done (lavaud=%u)\n", audio_step);
