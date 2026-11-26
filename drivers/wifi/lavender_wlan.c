@@ -49,6 +49,8 @@
 #include <kern/sched_prim.h>
 #include <libkern/libkern.h>
 #include <machine/machine_routines.h>
+#include <vm/pmap.h>
+#include <vm/memory_types.h>
 #include <pexpert/pexpert.h>
 
 extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
