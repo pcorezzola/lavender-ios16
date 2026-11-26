@@ -1,0 +1,88 @@
+diff --git a/bsd/dev/lavender_audio.c b/bsd/dev/lavender_audio.c
+index 34a458b..5b4fcb5 100644
+--- a/bsd/dev/lavender_audio.c
++++ b/bsd/dev/lavender_audio.c
+@@ -420,6 +420,7 @@ static unsigned glink_tx_msgs, glink_rx_msgs;
+ static unsigned glink_intent_log;
+ static uint32_t adm_status, adm_copp;
+ static uint32_t asm_map_handle, asm_map_status;
++static volatile uint32_t asm_write_done;
+ 
+ static inline uint32_t
+ audio_rd(vm_offset_t base, uint32_t off)
+@@ -2321,6 +2322,9 @@ glink_rx_one(void)
+ 			const struct apr_hdr *a =
+ 			    (const struct apr_hdr *)(const void *)buf;
+ 
++			if (a->opcode == 0x00010D99u) {
++				asm_write_done = 1;
++			}
+ 			printf("SWEET AUDIO: APR rx src %u/%u dst %u/%u "
+ 			    "opcode %08x token %u len %u\n", a->src_svc,
+ 			    a->src_domain, a->dest_svc, a->dest_domain,
+@@ -2750,7 +2754,7 @@ audio_asm_tone(void)
+ 		uint32_t property;
+ 		uint32_t low, high, size;
+ 	} __attribute__((packed)) map = {
+-		3, 1, 0, 0, 0, 65536
++		3, 1, 0, 0, 0, 16384
+ 	};
+ 	uint32_t wr[8];
+ 	uint32_t ms;
+@@ -2761,18 +2765,18 @@ audio_asm_tone(void)
+ 	if (audio_step < 13 || audio_step > 14) {
+ 		return;
+ 	}
+-	audio_announce("ASM tone buffer (64 KiB) and 1 kHz write");
+-	err = audio_contig(65536, &buf, &pa);
++	audio_announce("ASM tone buffer (16 KiB) and 1 kHz write");
++	err = audio_contig(16384, &buf, &pa);
+ 	if (err != 0) {
+ 		printf("SWEET AUDIO: tone buffer allocation failed %d\n", err);
+ 		return;
+ 	}
+ 	int16_t *s = (int16_t *)buf;
+-	for (uint32_t i = 0; i < 16384; i++) {
++	for (uint32_t i = 0; i < 4096; i++) {
+ 		s[2 * i] = (int16_t)(tone[i % 48] * 8);
+ 		s[2 * i + 1] = (int16_t)(tone[i % 48] * 8);
+ 	}
+-	flush_dcache64(pa, 65536, TRUE);
++	flush_dcache64(pa, 16384, TRUE);
+ 	printf("SWEET AUDIO: tone buffer pa %llx (va %lx)\n",
+ 	    (unsigned long long)pa, (unsigned long)buf);
+ 
+@@ -2792,15 +2796,26 @@ audio_asm_tone(void)
+ 	wr[0] = (uint32_t)pa;
+ 	wr[1] = (uint32_t)(pa >> 32);
+ 	wr[2] = asm_map_handle;
+-	wr[3] = 65536;
+-	(void)glink_send_apr_pkt(APR_SVC_ASM, STREAM_PORT, STREAM_PORT,
+-	    ASM_DATA_CMD_WRITE_V2, wr, sizeof(wr), 11);
+-	for (ms = 0; ms < 3000; ms += 10) {
+-		while (glink_rx_one()) {
++	wr[3] = 16384;
++	uint32_t reps = 0;
++	for (uint32_t rep = 0; rep < 12; rep++) {
++		asm_write_done = 0;
++		(void)glink_send_apr_pkt(APR_SVC_ASM, STREAM_PORT,
++		    STREAM_PORT, ASM_DATA_CMD_WRITE_V2, wr, sizeof(wr),
++		    11 + rep);
++		for (ms = 0; ms < 1000 && !asm_write_done; ms += 10) {
++			while (glink_rx_one()) {
++			}
++			audio_wait(10);
+ 		}
+-		audio_wait(10);
++		if (!asm_write_done) {
++			printf("SWEET AUDIO: tone write %u no WRITE_DONE, "
++			    "stopping\n", rep);
++			break;
++		}
++		reps++;
+ 	}
+-	printf("SWEET AUDIO: ASM 64 KiB tone sent once (tx %u rx %u)\n",
++	printf("SWEET AUDIO: ASM 16 KiB tone x%u (tx %u rx %u)\n", reps,
+ 	    glink_tx_msgs, glink_rx_msgs);
+ }
+ 
