@@ -2557,6 +2557,27 @@ audio_afe_port(void)
 	}
 	printf("SWEET AUDIO: AFE MI2S clock 0x113 at %u Hz sent\n", 1536000u);
 
+	/* Codec MCLK: the internal MCLK at 9.6 MHz (0x927c00). */
+	memset(&clk_pkt, 0, sizeof(clk_pkt));
+	clk_pkt.payload_size = 12 + sizeof(clk_pkt.clk);
+	clk_pkt.module = AFE_MODULE_CLOCK_SET;
+	clk_pkt.param = AFE_PARAM_ID_CLOCK_SET;
+	clk_pkt.size = sizeof(clk_pkt.clk);
+	clk_pkt.clk.version = 1;
+	clk_pkt.clk.id = AFE_CLK_INT_MCLK_1;
+	clk_pkt.clk.hz = 9600000;
+	clk_pkt.clk.attribute = 1;      /* COUPLE_NO */
+	clk_pkt.clk.root = 0;
+	clk_pkt.clk.enable = 1;
+	(void)glink_send_apr_pkt(APR_SVC_AFE, 1, 0, AFE_SVC_CMD_SET_PARAM,
+	    &clk_pkt, sizeof(clk_pkt), 20);
+	for (ms = 0; ms < 1000; ms += 10) {
+		while (glink_rx_one()) {
+		}
+		audio_wait(10);
+	}
+	printf("SWEET AUDIO: AFE codec MCLK 0x306 at 9600000 Hz sent\n");
+
 	memset(&pkt, 0, sizeof(pkt));
 	pkt.port_id = AFE_PORT_INT4_MI2S_RX;
 	pkt.module = AFE_MODULE_AUDIO_DEV_INTERFACE;
