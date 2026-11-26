@@ -1,0 +1,130 @@
+diff --git a/bsd/dev/lavender_audio.c b/bsd/dev/lavender_audio.c
+index 988b4d3..34a458b 100644
+--- a/bsd/dev/lavender_audio.c
++++ b/bsd/dev/lavender_audio.c
+@@ -323,6 +323,7 @@ struct smp2p_entry {
+ #define AFE_MODULE_CLOCK_SET           0x0001028Fu
+ #define AFE_PARAM_ID_CLOCK_SET         0x00010290u
+ #define AFE_CLK_INT4_MI2S_IBIT         0x00000113u
++#define AFE_CLK_INT_MCLK_1             0x00000306u
+ #define AFE_PORT_INT4_MI2S_RX          0x1036u
+ 
+ /* ADM, F6: the playback device path (COPP) to the AFE port. */
+@@ -2552,6 +2553,27 @@ audio_afe_port(void)
+ 	}
+ 	printf("SWEET AUDIO: AFE MI2S clock 0x113 at %u Hz sent\n", 1536000u);
+ 
++	/* Codec MCLK: the internal MCLK at 9.6 MHz (0x927c00). */
++	memset(&clk_pkt, 0, sizeof(clk_pkt));
++	clk_pkt.payload_size = 12 + sizeof(clk_pkt.clk);
++	clk_pkt.module = AFE_MODULE_CLOCK_SET;
++	clk_pkt.param = AFE_PARAM_ID_CLOCK_SET;
++	clk_pkt.size = sizeof(clk_pkt.clk);
++	clk_pkt.clk.version = 1;
++	clk_pkt.clk.id = AFE_CLK_INT_MCLK_1;
++	clk_pkt.clk.hz = 9600000;
++	clk_pkt.clk.attribute = 1;      /* COUPLE_NO */
++	clk_pkt.clk.root = 0;
++	clk_pkt.clk.enable = 1;
++	(void)glink_send_apr_pkt(APR_SVC_AFE, 1, 0, AFE_SVC_CMD_SET_PARAM,
++	    &clk_pkt, sizeof(clk_pkt), 20);
++	for (ms = 0; ms < 1000; ms += 10) {
++		while (glink_rx_one()) {
++		}
++		audio_wait(10);
++	}
++	printf("SWEET AUDIO: AFE codec MCLK 0x306 at 9600000 Hz sent\n");
++
+ 	memset(&pkt, 0, sizeof(pkt));
+ 	pkt.port_id = AFE_PORT_INT4_MI2S_RX;
+ 	pkt.module = AFE_MODULE_AUDIO_DEV_INTERFACE;
+@@ -2728,7 +2750,7 @@ audio_asm_tone(void)
+ 		uint32_t property;
+ 		uint32_t low, high, size;
+ 	} __attribute__((packed)) map = {
+-		3, 1, 0, 0, 0, 16384
++		3, 1, 0, 0, 0, 65536
+ 	};
+ 	uint32_t wr[8];
+ 	uint32_t ms;
+@@ -2739,18 +2761,18 @@ audio_asm_tone(void)
+ 	if (audio_step < 13 || audio_step > 14) {
+ 		return;
+ 	}
+-	audio_announce("ASM tone buffer (16 KiB) and 1 kHz write");
+-	err = audio_contig(16384, &buf, &pa);
++	audio_announce("ASM tone buffer (64 KiB) and 1 kHz write");
++	err = audio_contig(65536, &buf, &pa);
+ 	if (err != 0) {
+ 		printf("SWEET AUDIO: tone buffer allocation failed %d\n", err);
+ 		return;
+ 	}
+ 	int16_t *s = (int16_t *)buf;
+-	for (uint32_t i = 0; i < 4096; i++) {
++	for (uint32_t i = 0; i < 16384; i++) {
+ 		s[2 * i] = (int16_t)(tone[i % 48] * 8);
+ 		s[2 * i + 1] = (int16_t)(tone[i % 48] * 8);
+ 	}
+-	flush_dcache64(pa, 16384, TRUE);
++	flush_dcache64(pa, 65536, TRUE);
+ 	printf("SWEET AUDIO: tone buffer pa %llx (va %lx)\n",
+ 	    (unsigned long long)pa, (unsigned long)buf);
+ 
+@@ -2770,17 +2792,15 @@ audio_asm_tone(void)
+ 	wr[0] = (uint32_t)pa;
+ 	wr[1] = (uint32_t)(pa >> 32);
+ 	wr[2] = asm_map_handle;
+-	wr[3] = 16384;
+-	for (uint32_t rep = 0; rep < 40; rep++) {
+-		(void)glink_send_apr_pkt(APR_SVC_ASM, STREAM_PORT, STREAM_PORT,
+-		    ASM_DATA_CMD_WRITE_V2, wr, sizeof(wr), 11 + rep);
+-		for (ms = 0; ms < 100; ms += 10) {
+-			while (glink_rx_one()) {
+-			}
+-			audio_wait(10);
++	wr[3] = 65536;
++	(void)glink_send_apr_pkt(APR_SVC_ASM, STREAM_PORT, STREAM_PORT,
++	    ASM_DATA_CMD_WRITE_V2, wr, sizeof(wr), 11);
++	for (ms = 0; ms < 3000; ms += 10) {
++		while (glink_rx_one()) {
+ 		}
++		audio_wait(10);
+ 	}
+-	printf("SWEET AUDIO: ASM tone written 40 times (tx %u rx %u)\n",
++	printf("SWEET AUDIO: ASM 64 KiB tone sent once (tx %u rx %u)\n",
+ 	    glink_tx_msgs, glink_rx_msgs);
+ }
+ 
+@@ -2809,7 +2829,11 @@ audio_pm660l_speaker(void)
+ 	if (audio_step != 14) {
+ 		return;
+ 	}
+-	audio_announce("PM660L speaker PA and boost enable");
++	audio_announce("PM660L clock block + speaker PA/boost enable");
++	(void)pm660l_update(0x0146, 0x30, 0x30);   /* MASTER_BIAS_CTL */
++	(void)pm660l_update(0x0046, 0x80, 0x80);   /* CDC_RST_CTL */
++	(void)pm660l_update(0x0048, 0x0c, 0x0c);   /* CDC_TOP_CLK_CTL */
++	audio_wait(2);
+ 	(void)pm660l_update(0x0049, 0x10, 0x10);   /* CDC_ANA_CLK_CTL */
+ 	(void)pm660l_update(0x01b5, 0x01, 0x01);   /* SPKR_PWRSTG_CTL */
+ 	audio_wait(2);
+diff --git a/bsd/dev/sweet_spmi.c b/bsd/dev/sweet_spmi.c
+index 7a1a44a..396210d 100644
+--- a/bsd/dev/sweet_spmi.c
++++ b/bsd/dev/sweet_spmi.c
+@@ -282,10 +282,11 @@ sweet_spmi_lavender_write(unsigned sid, unsigned addr, uint8_t val)
+ 		return -1;
+ 	}
+ 	uint8_t lo = (uint8_t)(addr & 0xffu);
+-	bool allowed = (lo >= 0x70u && lo <= 0x72u) || lo == 0x49u ||
+-	    lo == 0x9eu || lo == 0xb0u || lo == 0xb2u || lo == 0xb3u ||
+-	    lo == 0xb4u || lo == 0xb5u || lo == 0xb6u || lo == 0xc0u ||
+-	    lo == 0xc1u || lo == 0xc3u;
++	bool allowed = (lo >= 0x70u && lo <= 0x72u) || lo == 0x46u ||
++	    lo == 0x48u || lo == 0x49u || lo == 0x9eu || lo == 0xb0u ||
++	    lo == 0xb2u || lo == 0xb3u || lo == 0xb4u || lo == 0xb5u ||
++	    lo == 0xb6u || lo == 0xc0u || lo == 0xc1u || lo == 0xc3u ||
++	    addr == 0xf146u;
+ 	if (!allowed) {
+ 		return -1;
+ 	}
