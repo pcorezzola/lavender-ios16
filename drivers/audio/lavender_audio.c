@@ -2921,7 +2921,7 @@ static void
 audio_swr_state(void)
 {
 	static const uint16_t regs[] = { 0x000, 0x004, 0x008, 0x00c, 0x010,
-		0x020, 0x100, 0x104 };
+		0x020, 0x100, 0x104, 0x1044, 0x1048 };
 
 	if (audio_step < 15) {
 		return;
@@ -2933,6 +2933,23 @@ audio_swr_state(void)
 	(void)audio_afe_vote(3, "LPASS_H", 30);   /* MACRO */
 	(void)audio_afe_vote(4, "LPASS_D", 31);   /* DCODEC */
 	audio_wait(5);
+
+	/* Vendor swrm_runtime_resume: soft reset, start the bus clock and
+	 * enable the master.  These are writes to an unclocked block, so the
+	 * read-back is the test. */
+	audio_announce("SWR master soft reset");
+	audio_wr(codec, 0x1000 + 0x008, 1);       /* SWRM_COMP_SW_RESET */
+	audio_wait(1);
+	audio_wr(codec, 0x1000 + 0x008, 1);
+	audio_wait(1);
+	audio_wr(codec, 0x1000 + 0x1044, 0x2);    /* MCP_BUS_CTRL clk start */
+	audio_wait(1);
+	audio_wr(codec, 0x1000 + 0x004, 0x1);     /* COMP_CFG enable */
+	audio_wait(2);
+	printf("SWEET AUDIO: SWR cfg %08x bus %08x\n",
+	    audio_rd(codec, 0x1000 + 0x004), audio_rd(codec, 0x1000 + 0x1044));
+	audio_wait(1);
+
 	for (uint32_t i = 0; i < sizeof(regs) / sizeof(regs[0]); i++) {
 		printf("SWEET AUDIO: SWR[%04x] = %08x\n", regs[i],
 		    audio_rd(codec, 0x1000 + regs[i]));
