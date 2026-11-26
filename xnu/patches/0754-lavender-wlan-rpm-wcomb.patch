@@ -1,0 +1,28 @@
+diff --git a/bsd/dev/lavender_wlan.c b/bsd/dev/lavender_wlan.c
+index b6af998..ec0f784 100644
+--- a/bsd/dev/lavender_wlan.c
++++ b/bsd/dev/lavender_wlan.c
+@@ -3352,8 +3352,7 @@ wlan_rails_on(void)
+ {
+ 	uint32_t magic, count, i;
+ 
+-	rpm_va = ml_io_map_unmappable(RPM_MSGRAM_PA, RPM_MSGRAM_SIZE,
+-	    VM_WIMG_IO);
++	rpm_va = ml_io_map_wcomb(RPM_MSGRAM_PA, RPM_MSGRAM_SIZE);
+ 	if (rpm_va == 0) {
+ 		printf("SWEET RPM: msgram map failed\n");
+ 		return;
+@@ -3387,9 +3386,13 @@ wlan_rails_on(void)
+ 		printf("SWEET RPM: FIFOs not found\n");
+ 		return;
+ 	}
++	printf("SWEET RPM: reset tx head\n");
+ 	rpm_wr32(rpm_tx_off + 4, 0);
++	printf("SWEET RPM: reset rx tail\n");
+ 	rpm_wr32(rpm_rx_off, 0);
++	printf("SWEET RPM: send version\n");
+ 	rpm_cmd(0, 0, 0);              /* VERSION (version 0) */
++	printf("SWEET RPM: version sent\n");
+ 	{
+ 		uint8_t open[32];
+ 		uint32_t name_len = sizeof(RPM_CHAN);
