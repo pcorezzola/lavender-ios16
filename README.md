@@ -53,7 +53,7 @@ Under the Apple logo and progress bar, the userland **Skylight** window server r
 | Camera | **Missing** | Camera button and camera stack are not implemented |
 | Wi-Fi | **Missing** | No Wi-Fi driver or firmware for the WCN3990 radio; the network is USB only |
 | Bluetooth | **Missing** | No Bluetooth transport; `bluetoothd` respawns in a loop without hardware |
-| Audio | **Missing** | The phone uses the PM660L analog codec, the LPASS digital codec/SoundWire and the ADSP (not the WCD9335; the DTBO disables `slim_aud`). Patch `0500` is a read-only platform probe (`lavaud=1`): the ladder to sound is in [docs/AUDIO.md](docs/AUDIO.md). |
+| Audio | **Data path verified, no sound** | ADSP/GLINK/APR, AFE, ADM, ASM and the 16 KiB tone work (12 × `WRITE_DONE`); the missing link is the LPASS digital codec/SoundWire master that feeds the PM660L's SWR DAC port. AP reads of `0x152c0000`/`0x152c1000` stall once the DSP audio is up. See [Audio](#audio). |
 | Wallpapers (most) | **Partial** | Only simple wallpapers (Color) render a preview; ones that need Metal such as Astronomy are very slow or fail. See Wallpapers |
 | Battery / charging UI | **Partial** | Static battery fallback (`100%`, 4200 mV); no gauge driver |
 | Home screen widgets | **Missing** | Both slots keep the `Esperando…` placeholder: the WidgetKit extension never hands over a first timeline. Not investigated yet; it sits in the same extension-hosting area as the wallpaper providers |
@@ -95,6 +95,7 @@ Opening *Settings → Wallpaper → Add New Wallpaper* used to show a blank gall
 
 ## Milestones
 
+- **2026-11-26 — Audio data path verified, no sound yet.** The ADSP boots, GLINK/APR answers, the AFE `INT4_MI2S_RX` port starts, ADM routes and ASM plays: a 16 KiB 1 kHz buffer is consumed twelve times with `WRITE_DONE` events. The LPASS MCLK (`0x15020018 = 1`) and the PM660L clock block/PA are applied. There is no audible output because the LPASS digital codec/SWR master that feeds the PM660L's SWR DAC port is not clocked/configured; AP reads of that block stall once the DSP audio is up. See [Audio](#audio).
 - **2026-11-21 — Home screen, Settings and Siri setup on screen.** A device screenshot shows SpringBoard's home screen with app icons, the dock, a notification badge and the App Library pill; the two widget slots wait on `Esperando…`. Settings opens with its full list and the first-run Siri screen appears. The boot console shows Skylight's software blit self-tests passing before the lock screen. Evidence: `docs/images/home-screen.png`, `settings.jpg`, `siri-setup.jpg`, `boot-self-tests.jpg`.
 - **2026-11-19 — Phase 0 safety net.** Verified stock fastboot ROM, TWRP, 15 partition backups + GPT, and a complete restore path.
 - **2026-11-19 — First XNU boot.** Kernel built for `LAVENDER` in GitHub Actions; the first boot reached `launchd` but died with `CS_KILLED`.
@@ -111,6 +112,119 @@ Opening *Settings → Wallpaper → Add New Wallpaper* used to show a blank gall
 - **2026-11-20 — Touch works: iOS home screen reached by touch.** The Novatek driver had been reading the controller in slow motion: on this port `delay()` never spins (the CPUs are registered with `powergate_latency` 0, so XNU blocks for every delay), and the bit-banged I2C does ~1800 delays per frame. `0230` times the bit-bang with a busy-wait: 0 I2C errors, frames in ~14 ms instead of seconds, and the setup screens, home screen and app icons respond to taps.
 - **2026-11-20 — 30 s off every boot.** Every boot stopped for exactly 30.000 s while XNU waited for an `IORTC` resource nothing publishes; that wait is also why the calendar started at 1970. `0220` skips it (as XNU does for BCM2837) and reads the PM660 RTC: eMMC and USB now come up at ~16 s instead of ~46 s.
 - **2026-11-20 — USB network on Windows.** `0213` turns the gadget into CDC-NCM: Windows 11 binds its in-box UsbNcm driver, `ping 192.168.7.2` answers (70/70, 1400-byte frames) and the kernel console streams live to the PC. No more TWRP round-trips to read a log.
+
+## Audio
+
+Status (2026-11-26): **the AFE/ADM/ASM data path is verified; there is no audible output yet.**
+Patches `0500`–`0522`. The register-level detail and the full ladder are in
+[`docs/AUDIO.md`](docs/AUDIO.md).
+
+```
+iOS userland HAL -> /dev/lavender-audio -> ASM stream -> ADM COPP
+  -> AFE INT4_MI2S_RX (0x1036) -> LPASS digital codec / SoundWire master (0x152c0000 / 0x152c1000)
+  -> PM660L analog codec (SPMI SID 3, 0xf000): SWR DAC port -> speaker PA/boost -> speaker
+```
+
+The PM660L is the speaker codec. The **WSA881x amplifiers are not fitted** on lavender
+(`qcom,wsa-disable`; the `msm-sdw-codec` WSA children are `status = "disabled"`), and the
+`tasha`/`tavil` SLIMbus codecs are disabled by the DTBO. The PM660L headset path uses the
+same LPASS digital codec/SWR, so there is no AP-only shortcut for the headset either.
+
+### What works
+
+| Stage | Evidence |
+| --- | --- |
+| ADSP power/PAS | `0507`/`0508`: GDSC on, SMMU CBCR on, all 21 ADSP segments copied, `AUTH_AND_RESET` |
+| GLINK `lpass` / APR | `0509`/`0509b`: descriptor 478, TX 479, RX 480, `VERSION_ACK`, `OPEN_ACK apr_audio_svc`, APR basic response |
+| AFE | `0510b`–`0511c`: `INT4_MI2S_RX 0x1036` clock (IBIT `0x113`, 1.536 MHz), I2S config (48 kHz, 16-bit, SD0, stereo) and `DEVICE_START`, all status 0 |
+| ADM | `0512`/`0513c`: `DEVICE_OPEN_V5` response `0x10329`, COPP `0`, `MATRIX_MAP_ROUTINGS_V5` status 0 |
+| ASM | `0513`–`0513d`: `OPEN_WRITE_V3`, `MEDIA_FMT_UPDATE_V2`, `RUN_V2`, map regions, `RUN` status 0 |
+| Tone buffer | `0514b`: 16 KiB contiguous buffer mapped and written; the DSP returned `ASM_DATA_EVENT_WRITE_DONE_V2` (`0x10D99`) |
+| Repeated writes | `0517c`: with **map handle 0**, twelve 16 KiB writes produced twelve `WRITE_DONE` events and no hang |
+| PM660L clock block/PA | `0514b`/`0520`: `MASTER_BIAS`/`RST_CTL`/`TOP_CLK`/`ANA_CLK` and speaker PA/boost writes return status 0; `0x15020018` (MCLK) reads 1 after the write |
+
+### What is missing
+
+- **The LPASS digital codec/SWR master is not clocked/configured for the AP.** Reading
+  `0x152c0000` or `0x152c1000` after the audio subsystem is up stalls the kernel (`0519`,
+  `0522`); the read-only probe at ~51 s, before the audio boot, returned zeros safely.
+  The vendor `swr-mstr-ctrl` driver requires the **LPASS core HW vote** (a QMI service
+  over GLINK) and the LPASS audio clock; without that vote the SWR master block is
+  unclocked.
+- **The PM660L SWR DAC port is never fed.** The AFE `INT4_MI2S_RX` starts and the tone is
+  consumed by the ADSP, but the LPASS digital codec does not route that MI2S to the SWR
+  master, so the PM660L DAC sees no data. The PM660L analog PA/boost being on only makes
+  silence louder.
+- **The vendor mixer path is `INT4_MI2S_RX -> RX4 MIX1 INP1=RX4 -> COMP1 -> SpkrLeft
+  COMP/BOOST/VISENSE -> SWR DAC_Port`**, i.e. the PM660L's internal SWR DAC port, not an
+  external amplifier.
+- **VDD_SPK/BOB and the PM660L supplies are RPM-managed**; this port has no RPM audio
+  regulator driver. The PM660L registers are accessible over SPMI, but the speaker boost
+  supply state is not verified.
+
+### Patch ladder (audio, 0500–0599)
+
+| Patch | Purpose | State |
+| --- | --- | --- |
+| `0500` | read-only LPASS/ADSP probe | device-verified |
+| `0501`–`0502` | LPASS power-up and ADSP firmware dry run | device-verified |
+| `0503`–`0508b` | TrustZone PAS load, SMP2P, carve-out copy | device-verified |
+| `0509`/`0509b` | GLINK `lpass` + APR (`apr_audio_svc`) | device-verified |
+| `0510` | lavender SPMI arbiter v3, PM660L SID 3 reads | device-verified |
+| `0510b`–`0511c` | AFE clock/I2S/start, `mem_mapping_hdr`, 32-byte APR header | device-verified |
+| `0512`–`0513d` | ADM open/route, ASM open/format/run, intents | device-verified |
+| `0514`/`0514b` | 16 KiB 1 kHz tone + PM660L PA/boost | data path verified, no sound |
+| `0515`/`0515b` | read-only PM660L clock/PA state | device-verified |
+| `0516`–`0518` | MCLK register, clock block, PA with map handle 0 | device-verified, no sound |
+| `0519` | read-only LPASS digital codec state | **hangs the kernel; do not use** |
+| `0520` | LPASS MCLK `0x15020018 = 1` | device-verified |
+| `0521` | primary MI2S `INT0 0x102e` experiment | device-verified, no sound (the speaker is INT4) |
+| `0522` | read-only SWR master state | **stalls at the read**; the block is not AP-accessible while the DSP owns it |
+
+### Traps and lessons
+
+- **SM6225 addresses do not apply.** The lavender SPMI arbiter v3 is at `0x0800f000`,
+  observer `0x09400000 + 0x8000*apid`; the PM660L is SPMI **SID 3** (`pm660l@3`), base
+  `0xf000`; the keys PMIC is SID 2.
+- **APR headers are 32 bytes.** The response payload starts at `hdr_len*4`
+  (`hdr_len = 8`), not at a fixed 20/32; the first `SET_PARAM_V2` attempts were rejected
+  because the 12-byte `mem_mapping_hdr` was missing.
+- **Intents must be freed on `RX_DONE`/`W_REUSE`.** The ADSP's `CMD_INTENT` uses `p1 = 2`;
+  filtering by `p1 == rcid` was the GLINK bug.
+- **ADM's `DEVICE_OPEN_V5` response is `{u32 status; u16 copp_id; u16 reserved}`**, and
+  the COPP is **0**. Parsing `0x408` from an older layout produced `EBADPARAM`.
+- **ASM commands use `src_port = dest_port = (session << 8) | stream = 0x0101`**; APD/ADM
+  use port 0.
+- **The ASM map handle is not `0xb095aad8`.** The DSP consumes the write with **map
+  handle 0**; using the value from the map response made the DSP never emit
+  `WRITE_DONE`. This was the single biggest fix in the data path.
+- **16 KiB per write.** A 64 KiB `ASM_DATA_CMD_WRITE_V2` hangs the DSP/kernel; repeated
+  writes must wait for the `0x10D99` WRITE_DONE event (12 × 16 KiB worked).
+- **The AFE clock set `0x306` does not generate the codec MCLK.** The real MCLK enable is
+  `audio_ext_clk`'s `qcom,mclk-clk-reg` at **`0x15020018` write 1** (read back 1).
+- **The PM660L clock block order matters**: `MASTER_BIAS` (0x146), `CDC_RST_CTL`
+  (0x46), `TOP_CLK_CTL` (0x48), then `ANA_CLK_CTL` (0x49) and the PA/boost registers.
+  Enabling `ANA_CLK`/PA without the clock block and MCLK hung the phone in `0514c`.
+- **The speaker is INT4_MI2S_RX, mono**, not INT0; the vendor `mixer_paths.xml` confirms
+  it. INT0 is the headset/handset path.
+- **The LPASS SWR/digital-codec block is not AP-accessible once the DSP audio is up.**
+  Read-only probes at boot (before the audio firmware runs) return zeros; after the ADSP
+  is running, the same reads stall. Do not add another read-only probe of `0x152c0000` or
+  `0x152c1000` without first implementing the LPASS core HW vote.
+
+### Next milestones
+
+1. **LPASS core/audio HW vote** over GLINK/QMI (`lpass_core_hw_vote`) — clocks the SWR
+   master and digital codec.
+2. **SWR master init** (`swr-mstr-ctrl.c` sequence: reset, frame row/col, clock divider,
+   bus control) at `0x152c1000`.
+3. **PM660L SWR DAC port** route (`SpkrLeft SWR DAC_Port`, RX4/COMP1) and speaker
+   PA/boost, with VDD_SPK/BOB verified.
+4. **Userland**: `/dev/lavender-audio` + HAL plug-in, then mic/headset detection.
+
+The shims used in this phase are archived in `artifacts/shim/`; the boot argument
+`lavaud=N` selects the ladder step (`lavaud=14` = full data path + PA; `lavaud=15` =
+read-only state probes; `lavaud=13` = data path without the PM660L PA).
 
 ## Hardware
 
@@ -182,7 +296,7 @@ tests/                    patch checks and host tests; tests/host/ runs the USB/
 
 The repository holds everything needed to build the lavender kernel and shim. Apple's XNU source comes from Apple's open-source release at build time. Apple binaries (IPSW, ADT, root image) are never included.
 
-The audio bring-up (the PM660L/LPASS/ADSP chain, patches `0500`+) and its current status are in [`docs/AUDIO.md`](docs/AUDIO.md).
+The audio bring-up (the PM660L/LPASS/ADSP chain, patches `0500`+) is summarised in [Audio](#audio); the register-level notes, patch ladder and traps are in [`docs/AUDIO.md`](docs/AUDIO.md).
 
 ## Companion repository: lavender-metal
 

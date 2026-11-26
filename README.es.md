@@ -53,7 +53,7 @@ Debajo del logo de Apple y la barra de progreso, el window server **Skylight** d
 | Cámara | **Falta** | Botón y stack de cámara sin implementar |
 | Wi-Fi | **Falta** | Sin driver ni firmware para la radio WCN3990; la red es solo por USB |
 | Bluetooth | **Falta** | Sin transporte Bluetooth; `bluetoothd` respawnea en bucle sin hardware |
-| Audio | **Falta** | Sin driver de codec, parlante ni micrófono: no hay sonido de entrada ni de salida |
+| Audio | **Ruta de datos verificada, sin sonido** | ADSP/GLINK/APR, AFE, ADM y ASM funcionan y el tono de 16 KiB se consume 12 veces (`WRITE_DONE`); falta el digital codec/SoundWire del LPASS que alimenta el puerto SWR DAC del PM660L. Las lecturas AP de `0x152c0000`/`0x152c1000` se cuelgan cuando el DSP ya arrancó el audio. Ver [Audio](#audio) |
 | Wallpapers (la mayoría) | **Parcial** | Solo los simples (Color) generan vista previa; los que necesitan Metal, como Astronomy, van muy lentos o fallan. Ver Wallpapers |
 | Batería / carga | **Parcial** | Fallback estático (100 %, 4200 mV); sin gauge |
 | Widgets de inicio | **Falta** | Los dos slots quedan en `Esperando…`: la extensión de WidgetKit nunca entrega la primera línea de tiempo. Sin investigar todavía; cae en la misma área de extensiones que los proveedores de fondos |
@@ -95,6 +95,7 @@ Una solución real necesita una ruta de GPU (un driver de kernel para el Adreno 
 
 ## Hitos
 
+- **2026-11-26 — Ruta de datos de audio verificada, sin sonido.** El ADSP arranca, GLINK/APR responde, el puerto AFE `INT4_MI2S_RX` inicia, ADM rutea y ASM reproduce: un buffer de 16 KiB a 1 kHz se consume 12 veces con eventos `WRITE_DONE`. Se aplican el MCLK del LPASS (`0x15020018 = 1`) y el clock block/PA del PM660L. No hay salida audible porque el digital codec/SWR del LPASS que alimenta el puerto SWR DAC del PM660L no está clockeado/configurado; las lecturas AP de ese bloque se cuelgan cuando el DSP ya arrancó el audio. Ver [Audio](#audio).
 - **2026-11-21 — Pantalla de inicio, Ajustes y Siri en pantalla.** Una captura del dispositivo muestra la pantalla de inicio de SpringBoard con íconos, dock, badge de notificación y el botón de la Biblioteca de apps; los dos widgets esperan en `Esperando…`. Ajustes abre con toda su lista y aparece la pantalla inicial de Siri. La consola de arranque muestra los self-tests de blit por software de Skylight pasando antes del lock screen. Evidencia: `docs/images/home-screen.png`, `settings.jpg`, `siri-setup.jpg`, `boot-self-tests.jpg`.
 - **2026-11-19 — Fase 0.** ROM stock verificada, TWRP, backups de 15 particiones + GPT y runbook de restauración.
 - **2026-11-21 — Touch arreglado.** Las compilaciones locales leían información de firmware basura del Novatek (`nvt fwinfo invalid`) y dejaban el touch desactivado; los kernels del CI (Xcode 15) no. `0234` hace que SweetHID use el panel real de 1080×2340: el swipe desde el borde inferior ahora desbloquea y los taps caen donde corresponde.
@@ -107,6 +108,59 @@ Una solución real necesita una ruta de GPU (un driver de kernel para el Adreno 
 - **2026-11-19 — Cuatro Gold.** `cpus=4` levanta los cuatro A73; los A53 Silver siguen aparcados por las páginas de 16 KiB.
 - **2026-11-19 — Migración inicial.** Una raíz nueva necesita una pasada larga de `DataMigration`. La imagen lleva `com.apple.DataMigration.plist` con `LastSystemVersion = 20H392` para que los siguientes boots la salten.
 - **2026-11-19 — Lock screen de iOS 16.** El teléfono llegó al lock screen de iOS 16.7.16: `Wednesday, December 31`, `4:37`, acceso a cámara y home indicator. Ese es el estado actual.
+
+## Audio
+
+Estado (2026-11-26): **la ruta de datos AFE/ADM/ASM está verificada; todavía no hay sonido.**
+Parches `0500`–`0522`; el detalle de registros está en [`docs/AUDIO.md`](docs/AUDIO.md).
+
+```
+iOS HAL -> /dev/lavender-audio -> ASM -> ADM COPP
+  -> AFE INT4_MI2S_RX (0x1036) -> digital codec/SWR del LPASS (0x152c0000 / 0x152c1000)
+  -> PM660L (SPMI SID 3, 0xf000): SWR DAC port -> PA/boost -> parlante
+```
+
+El PM660L es el códec del parlante. Los **WSA881x no están montados** en lavender
+(`qcom,wsa-disable`; los hijos WSA del `msm-sdw-codec` están `disabled`), y `tasha`/`tavil`
+están apagados por el DTBO. El auricular usa la misma ruta LPASS/SWR, así que no hay atajo
+AP-only.
+
+### Qué anda
+
+- PAS/ADSP, GLINK `lpass` y APR: `0507`–`0509b`.
+- AFE `INT4_MI2S_RX` clock/config/start, ADM open/route y ASM open/format/run: status 0.
+- Tono de 16 KiB mapeado y escrito; el DSP devuelve `WRITE_DONE` (`0x10D99`), 12 veces con
+  **map handle 0** (`0517c`).
+- MCLK `0x15020018 = 1` y clock block + PA del PM660L (`0520`).
+
+### Qué falta
+
+- El **digital codec/SWR master** del LPASS no está clockeado/configurado para el AP: leer
+  `0x152c0000`/`0x152c1000` con el DSP arriba cuelga (`0519`, `0522`). El vendor necesita el
+  **voto de clock LPASS** (`lpass_core_hw_vote`, QMI sobre GLINK).
+- La ruta `INT4_MI2S_RX -> RX4/COMP1 -> SpkrLeft SWR DAC_Port` no se habilita, así que el DAC
+  del PM660L no recibe datos; el PA encendido solo amplifica silencio.
+- `VDD_SPK/BOB` y los reguladores del PM660L son de RPM; este port no tiene ese driver.
+
+### Trampas
+
+- SPMI de lavender: `0x0800f000`, observer `0x09400000 + 0x8000*apid`, PM660L **SID 3** base
+  `0xf000`.
+- Header APR de 32 bytes (`hdr_len = 8`); `mem_mapping_hdr` de 12 bytes en `SET_PARAM_V2`.
+- ADM `DEVICE_OPEN_V5` responde `{status, u16 copp_id, u16 reserved}` y el COPP es **0**.
+- ASM usa `src = dest = (session << 8) | stream = 0x0101`; el write usa **handle 0**, no el
+  valor del map response (`0xb095aad8`).
+- 16 KiB por write; 64 KiB cuelga; repetir solo al recibir `0x10D99`.
+- El clock set `0x306` del AFE no genera MCLK; el real es `0x15020018 = 1`.
+- El parlante es **INT4**, mono; INT0 es auricular.
+- No leer `0x152c0000`/`0x152c1000` con el DSP arriba.
+
+### Próximo
+
+1. Voto de clock LPASS (`lpass_core_hw_vote`).
+2. Init del master SWR (`swr-mstr-ctrl.c`) en `0x152c1000`.
+3. Ruta `SWR DAC_Port` del PM660L + PA/BOB.
+4. `/dev/lavender-audio` + HAL y luego mic/auricular.
 
 ## Cómo arranca
 

@@ -30,6 +30,24 @@ proved the power fix and the loader:
 The full plan and the hardware evidence are in
 [`docs/AUDIO-BRIEF.md`](AUDIO-BRIEF.md).
 
+## Status 2026-11-26
+
+**The AFE/ADM/ASM data path is verified; there is no audible output yet.** Patches `0500`–`0522`.
+The ADSP boots, GLINK/APR answers, the AFE `INT4_MI2S_RX` (0x1036) port starts, ADM routes and
+ASM plays: a 16 KiB 1 kHz buffer is consumed **twelve times** with `ASM_DATA_EVENT_WRITE_DONE_V2`
+(`0x10D99`) when the write uses **map handle 0** (`0517c`). The LPASS MCLK register `0x15020018`
+reads 1 (`0520`) and the PM660L clock block + speaker PA writes return 0.
+
+The missing link is the **LPASS digital codec / SoundWire master** that feeds the PM660L's
+**SWR DAC port**: reading `0x152c0000` or `0x152c1000` after the DSP audio is up stalls the
+kernel (`0519`, `0522`), and the vendor `swr-mstr-ctrl` driver needs the **LPASS core HW vote**
+(QMI over GLINK) before the block is accessible. The **WSA881x amplifiers are not fitted**
+(`qcom,wsa-disable`), so the speaker path is the PM660L's internal SWR DAC port, not an
+external amp. The headset path uses the same LPASS/SWR block.
+
+The README's [Audio section](../README.md#audio) has the summary, the grouped patch table and
+the traps; this document keeps the register-level notes and the early ladder.
+
 ## What the phone actually has
 
 The port's first assumption ("no codec driver, port the WCD9335") was wrong for this
@@ -77,10 +95,16 @@ userland AudioServer plug-in in `/System/Library/Audio/Plug-Ins/HAL` presenting
 | `0508b` | carve-out copy diagnostics from the `lavaud=4` hang: byte-wise `audio_io_copy`/`audio_io_zero` (the handoff says only byte stores are safe), `lavaudprobe=1` reads nine carve-out offsets and prints each 256 KiB read/copy point, `lavaudcopy=0` skips the segment copy to test a preloaded carve-out | written; pending kernel CI and device boot |
 | `0509` | GLINK `lpass` edge 478/479/480, channel open/version and APR `apr_audio_svc` | planned |
 | `0510` | PM660L codec over SPMI: add an isolated lavender SPMI arbiter v3 path (`0x0800f000`, observer `0x09400000 + 0x8000*apid`) and read the PM660L (SID 3, peripheral `0xf0`) ID/revision registers at `0xf000` (`lavaud=8`, read-only). Supplies, reset, MCLK, HP/SPK/MBHC come next | **device-verified read-only**: `0xF004=0x23` (digital PERPH_TYPE), `0xF005=0x04`; all reads return 0 |
-| `0511` | LPASS digital codec + SWR master + AFE `INT4_MI2S_RX` port | planned |
-| `0512` | ASM stream + ADM COPP to `INT4_MI2S_RX`, 1 kHz test tone | planned |
-| `0513` | `/dev/lavender-audio` + the HAL plug-in (`Speaker`/`Hawking`/`Codec`) | planned |
-| `0514`+ | microphone (`INT3_MI2S_TX`/ADC), jack/MBHC, volume, suspend | planned |
+| `0510b`–`0511c` | AFE `INT4_MI2S_RX` clock/I2S/start; 12-byte `mem_mapping_hdr`; 32-byte APR header | **device-verified**: all status 0 |
+| `0512`–`0513d` | ADM `DEVICE_OPEN_V5`/route; ASM open/format/run; intents and `RX_DONE` | **device-verified** |
+| `0514`/`0514b` | 16 KiB 1 kHz tone, map and write; PM660L clock block/PA/boost | **data path verified**, no sound |
+| `0515`/`0515b` | read-only PM660L clock/PA state | device-verified |
+| `0516`–`0518` | MCLK register, clock block, PA with map handle 0 | device-verified, no sound |
+| `0519` | read-only LPASS digital codec state | **hangs the kernel; do not use** |
+| `0520` | LPASS MCLK `0x15020018 = 1` | device-verified |
+| `0521` | primary MI2S `INT0 0x102e` experiment | device-verified, no sound (the speaker is INT4) |
+| `0522` | read-only SWR master state | **stalls at the read**; the DSP owns the block |
+| `0523`+ | LPASS core/audio HW vote, SWR master init, PM660L SWR DAC port, `/dev` + HAL | next |
 
 ## Running the probe
 
