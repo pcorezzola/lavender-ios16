@@ -841,7 +841,13 @@ static boolean_t q_hello_sent, q_hello_rx, q_wlfw_seen;
 static uint8_t q_tx[4 + TFTP_BLK + 80];
 static uint8_t q_pending[4 + TFTP_BLK + 80];
 static uint32_t q_pending_len;
+static boolean_t g_qrtr_ctl;
 static uint32_t q_pending_dport, q_last_dport;
+#define Q_CTRL_SLOTS 4
+#define Q_CTRL_SIZE  80
+static uint8_t q_ctrl[Q_CTRL_SLOTS][Q_CTRL_SIZE];
+static uint32_t q_ctrl_len[Q_CTRL_SLOTS];
+static unsigned q_ctrl_head, q_ctrl_tail;
 static unsigned g_ms, g_tx_msgs, g_rx_msgs;
 static uint32_t g_last_desc[4];
 static uint32_t g_last_intent_size, g_last_miss_len, g_max_intent_size;
@@ -1018,44 +1024,16 @@ wlan_svc_name(uint32_t svc)
 
 /* Queue one QRTR packet into a modem RX intent; one pending packet at a time. */
 static boolean_t
-wlan_glink_send(const void *data, uint32_t len)
+wlan_glink_send_now(const void *data, uint32_t len)
 {
 	unsigned i;
 
-	if (q_pending_len != 0) {
-		return FALSE;
-	}
 	for (i = 0; i < g_ri_count; i++) {
 		if (!g_ri[i].used && g_ri[i].size >= len) {
 			break;
 		}
 	}
 	if (i == g_ri_count) {
-		uint32_t maxs = 0, all = 0;
-
-		for (i = 0; i < g_ri_count; i++) {
-			if (g_ri[i].size > all) {
-				all = g_ri[i].size;
-			}
-			if (g_ri[i].size > maxs && !g_ri[i].used) {
-				maxs = g_ri[i].size;
-			}
-		}
-		if (len != g_last_miss_len) {
-			g_last_miss_len = len;
-			printf("SWEET WLAN: glink no intent for %u (free max "
-			    "%x, all max %x, n %u, q %u)\n", len, maxs, all,
-			    g_ri_count, q_pending_len);
-		}
-		if (len <= sizeof(q_pending) && q_pending_len == 0) {
-			memcpy(q_pending, data, len);
-			q_pending_len = len;
-			q_pending_dport = q_last_dport;
-		}
-		if (!g_intent_req_sent) {
-			wlan_glink_cmd(CMD_RX_INTENT_REQ, GLINK_LCID, len);
-			g_intent_req_sent = TRUE;
-		}
 		return FALSE;
 	}
 	{
@@ -1065,24 +1043,97 @@ wlan_glink_send(const void *data, uint32_t len)
 		g_ri[i].used = TRUE;
 		if (!wlan_tx_write(&h, sizeof(h), data, len)) {
 			g_ri[i].used = FALSE;
-			if (len <= sizeof(q_pending)) {
-				memcpy(q_pending, data, len);
-				q_pending_len = len;
-			}
 			return FALSE;
 		}
 	}
 	return TRUE;
 }
 
+static boolean_t
+wlan_glink_send(const void *data, uint32_t len)
+{
+	unsigned i;
+	uint32_t maxs = 0, all = 0;
+
+	if (q_pending_len != 0) {
+		return FALSE;
+	}
+	if (wlan_glink_send_now(data, len)) {
+		return TRUE;
+	}
+	for (i = 0; i < g_ri_count; i++) {
+		if (g_ri[i].size > all) {
+			all = g_ri[i].size;
+		}
+		if (g_ri[i].size > maxs && !g_ri[i].used) {
+			maxs = g_ri[i].size;
+		}
+	}
+	if (len != g_last_miss_len) {
+		g_last_miss_len = len;
+		printf("SWEET WLAN: glink no intent for %u (free max "
+		    "%x, all max %x, n %u, q %u)\n", len, maxs, all,
+		    g_ri_count, q_pending_len);
+	}
+	if (len <= sizeof(q_pending)) {
+		memcpy(q_pending, data, len);
+		q_pending_len = len;
+		q_pending_dport = q_last_dport;
+	}
+	if (!g_intent_req_sent) {
+		wlan_glink_cmd(CMD_RX_INTENT_REQ, GLINK_LCID, len);
+		g_intent_req_sent = TRUE;
+	}
+	return FALSE;
+}
+
+/*
+ * Control traffic (QRTR RESUME_TX credits) must never be dropped: if it
+ * is, the peer's flow-control window fills, its TFTP thread blocks in
+ * qrtr_sendmsg and the transfer stalls silently (0750 died at ~block
+ * 780). Small packets, separate ring, flushed every poll.
+ */
+static boolean_t
+wlan_glink_send_ctl(const void *data, uint32_t len)
+{
+	if (wlan_glink_send_now(data, len)) {
+		return TRUE;
+	}
+	if (len <= Q_CTRL_SIZE) {
+		memcpy(q_ctrl[q_ctrl_head], data, len);
+		q_ctrl_len[q_ctrl_head] = len;
+		q_ctrl_head = (q_ctrl_head + 1) % Q_CTRL_SLOTS;
+		if (q_ctrl_head == q_ctrl_tail) {
+			q_ctrl_tail = (q_ctrl_tail + 1) % Q_CTRL_SLOTS;
+		}
+	}
+	if (!g_intent_req_sent) {
+		wlan_glink_cmd(CMD_RX_INTENT_REQ, GLINK_LCID, len);
+		g_intent_req_sent = TRUE;
+	}
+	return FALSE;
+}
+
 static void
+wlan_glink_ctl_flush(void)
+{
+	while (q_ctrl_tail != q_ctrl_head) {
+		if (!wlan_glink_send_now(q_ctrl[q_ctrl_tail],
+		    q_ctrl_len[q_ctrl_tail])) {
+			break;
+		}
+		q_ctrl_tail = (q_ctrl_tail + 1) % Q_CTRL_SLOTS;
+	}
+}
+
+static boolean_t
 wlan_qrtr_send(uint32_t type, uint32_t src_port, uint32_t dst_node,
     uint32_t dst_port, const void *payload, uint32_t len)
 {
 	uint32_t hlen, total;
 
 	if (len + 40 > sizeof(q_tx)) {
-		return;
+		return FALSE;
 	}
 	memset(q_tx, 0, sizeof(q_tx));
 	if (q_ver == 2) {
@@ -1113,7 +1164,24 @@ wlan_qrtr_send(uint32_t type, uint32_t src_port, uint32_t dst_node,
 	memcpy(q_tx + hlen, payload, len);
 	total = (hlen + len + 3) & ~3u;
 	q_last_dport = dst_port;
-	(void)wlan_glink_send(q_tx, total);
+	if (g_qrtr_ctl) {
+		g_qrtr_ctl = FALSE;
+		return wlan_glink_send_ctl(q_tx, total);
+	}
+	return wlan_glink_send(q_tx, total);
+}
+
+/* Same packet, but the control ring keeps it when no intent is free. */
+static boolean_t
+wlan_qrtr_send_ctl(uint32_t type, uint32_t src_port, uint32_t dst_node,
+    uint32_t dst_port, const void *payload, uint32_t len)
+{
+	boolean_t ok;
+
+	g_qrtr_ctl = TRUE;
+	ok = wlan_qrtr_send(type, src_port, dst_node, dst_port, payload, len);
+	g_qrtr_ctl = FALSE;
+	return ok;
 }
 
 /* --- F2 step 5: tftp host service (firmware files) ----------------------- */
@@ -2563,7 +2631,7 @@ wlan_svc_rx(uint32_t src_node, uint32_t src_port, uint32_t dst_port,
 static void
 wlan_qrtr_rx(const uint8_t *p, uint32_t len)
 {
-	uint32_t type, src_node, src_port, dst_port, size, hlen, confirm;
+	uint32_t type, src_node, src_port, dst_node, dst_port, size, hlen, confirm;
 	const struct qrtr_ctrl *c;
 
 	if (len >= sizeof(struct qrtr_hdr_v1) && p[0] == 1 && p[1] == 0 &&
@@ -2574,6 +2642,7 @@ wlan_qrtr_rx(const uint8_t *p, uint32_t len)
 		type = h->type;
 		src_node = h->src_node;
 		src_port = h->src_port;
+		dst_node = h->dst_node;
 		dst_port = h->dst_port;
 		size = h->size;
 		hlen = sizeof(*h);
@@ -2586,6 +2655,7 @@ wlan_qrtr_rx(const uint8_t *p, uint32_t len)
 		type = h->type;
 		src_node = h->src_node;
 		src_port = h->src_port == 0xfffe ? QRTR_PORT_CTRL : h->src_port;
+		dst_node = h->dst_node;
 		dst_port = h->dst_port == 0xfffe ? QRTR_PORT_CTRL : h->dst_port;
 		size = h->size;
 		hlen = sizeof(*h) + h->optlen * 4;
@@ -2629,10 +2699,11 @@ wlan_qrtr_rx(const uint8_t *p, uint32_t len)
 	case QRTR_TYPE_DATA:
 		if (confirm) {
 			struct qrtr_ctrl r = { QRTR_TYPE_RESUME_TX,
-				QRTR_NODE_APPS, dst_port, 0, 0 };
+				dst_node, dst_port, 0, 0 };
 
-			wlan_qrtr_send(QRTR_TYPE_RESUME_TX, dst_port, src_node,
-			    src_port, &r, sizeof(r));
+			/* Never dropped: the peer blocks after 10 misses. */
+			(void)wlan_qrtr_send_ctl(QRTR_TYPE_RESUME_TX,
+			    dst_port, src_node, src_port, &r, sizeof(r));
 		}
 		(void)wlan_svc_rx(src_node, src_port, dst_port, p + hlen,
 		    size);
@@ -2860,6 +2931,7 @@ wlan_glink_poll(unsigned ms)
 {
 	g_ms = ms;
 	wlan_tftp_tick(ms);
+	wlan_glink_ctl_flush();
 	if (g_desc != NULL) {
 		uint32_t d0 = g_desc[0], d1 = g_desc[1], d2 = g_desc[2];
 		uint32_t d3 = g_desc[3];
@@ -2894,6 +2966,8 @@ wlan_glink_poll(unsigned ms)
 	}
 	for (int i = 0; i < 64 && g_rx != NULL && wlan_rx_one(); i++) {
 	}
+	/* A RESUME_TX generated while handling RX should leave right away. */
+	wlan_glink_ctl_flush();
 	if (q_pending_len != 0) {
 		unsigned i;
 
