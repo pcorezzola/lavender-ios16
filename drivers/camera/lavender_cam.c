@@ -29,7 +29,9 @@
  *   lvcamspmi2=S    arbiter version S seconds after the probe thread starts
  *                   (the second one too, if given); a stalled read loses the
  *                   helper only, so one boot shows whether the arbiter
- *                   answers before this probe touches anything
+ *                   answers before this probe touches anything. 1013 stops
+ *                   unmapping: ml_io_unmap() panics in this port
+ *                   (pmap_remove_options: invalid address range).
  *   lvcamsel=0/1/2  the camera the driver works on from F1 on: 0 the rear
  *                   main (camera@0, csiphy0/csid0, CCI master 0), 1 the
  *                   second rear (camera@1, csiphy1/csid1, master 1, has
@@ -617,6 +619,11 @@ cam_smmu(void)
 #define CAM_SPMI_STRIDE         0x8000u
 #define CAM_SPMI_NO_APID        0xffffu
 
+/* 1013: never call ml_io_unmap() here. In this port it panics in
+ * pmap_remove_options() ("invalid address range") on a mapping that came
+ * from ml_io_map(), and no other driver unmaps. The probe runs once per
+ * boot, so its few page mappings stay for the life of the system. */
+
 /* PM660L (SID 2) camera@0 VDIG pad, and the qpnp-pin register offsets
  * pinctrl-spmi-gpio.c uses (there is no 0x08 STATUS on this peripheral). */
 #define CAM_PM660L_SID          2u
@@ -640,7 +647,6 @@ cam_smmu(void)
 #define CAM_GPIO_CCI_SDA0       36u              /* CCI master 0 data */
 #define CAM_GPIO_CCI_SCL0       37u              /* CCI master 0 clock */
 
-extern void ml_io_unmap(vm_offset_t, vm_size_t);
 
 struct cam_pad {
 	uint8_t type, rtsts, mode, vin, en;
@@ -743,17 +749,14 @@ cam_spmi_read(uint8_t sid, uint16_t addr, uint8_t *out)
 			if (status & 0x0eu) {
 				printf("SWEET CAM: SPMI read error %08x addr "
 				    "%#x\n", status, addr);
-				ml_io_unmap(chan, 0x1000);
 				return EIO;
 			}
 			*out = (uint8_t)cam_rd(chan, 0x18);
-			ml_io_unmap(chan, 0x1000);
 			return 0;
 		}
 		cam_wait(1);
 	}
 	printf("SWEET CAM: SPMI read timeout addr %#x\n", addr);
-	ml_io_unmap(chan, 0x1000);
 	return ETIMEDOUT;
 }
 
@@ -781,10 +784,8 @@ cam_spmi_write(uint8_t sid, uint16_t addr, uint8_t val)
 	}
 	if ((cam_rd(cfg, 0x700u + 4u * apid) & 0x7u) != 0) {
 		printf("SWEET CAM: SPMI APID %u is not APPS-owned\n", apid);
-		ml_io_unmap(cfg, 0x1000);
 		return EACCES;
 	}
-	ml_io_unmap(cfg, 0x1000);
 	chan = ml_io_map(CAM_SPMI_CHNLS_PA + CAM_SPMI_STRIDE * apid, 0x1000);
 	if (chan == 0) {
 		return EIO;
@@ -798,16 +799,13 @@ cam_spmi_write(uint8_t sid, uint16_t addr, uint8_t val)
 			if (status & 0x0eu) {
 				printf("SWEET CAM: SPMI write error %08x addr "
 				    "%#x\n", status, addr);
-				ml_io_unmap(chan, 0x1000);
 				return EIO;
 			}
-			ml_io_unmap(chan, 0x1000);
 			return 0;
 		}
 		cam_wait(1);
 	}
 	printf("SWEET CAM: SPMI write timeout addr %#x\n", addr);
-	ml_io_unmap(chan, 0x1000);
 	return ETIMEDOUT;
 }
 
@@ -1244,7 +1242,6 @@ cam_spmi_vantage_thread(__unused void *arg, __unused wait_result_t wr)
 	}
 	printf("SWEET CAM: vantage %u s: reading the arbiter\n", at);
 	printf("SWEET CAM: vantage %u s: arbiter %#x\n", at, cam_rd(core, 0));
-	ml_io_unmap(core, 0x1000);
 	printf("SWEET CAM: vantage %u s: done\n", at);
 }
 
