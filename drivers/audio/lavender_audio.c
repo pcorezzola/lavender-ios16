@@ -2774,7 +2774,7 @@ audio_asm_tone(void)
 	memset(wr, 0, sizeof(wr));
 	wr[0] = (uint32_t)pa;
 	wr[1] = (uint32_t)(pa >> 32);
-	wr[2] = asm_map_handle;
+	wr[2] = 0;            /* 0514 proved the DSP consumes the physical address with handle 0 */
 	wr[3] = 16384;
 	uint32_t reps = 0;
 	for (uint32_t rep = 0; rep < 12; rep++) {
