@@ -1,0 +1,422 @@
+diff --git a/bsd/dev/lavender_wlan.c b/bsd/dev/lavender_wlan.c
+index af73311..bc15c02 100644
+--- a/bsd/dev/lavender_wlan.c
++++ b/bsd/dev/lavender_wlan.c
+@@ -53,6 +53,7 @@
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ extern vm_offset_t ml_io_map_wcomb(vm_offset_t, vm_size_t);
++extern vm_offset_t ml_io_map_unmappable(vm_offset_t, vm_size_t, uint32_t);
+ extern int lavender_modem_fw_size(const char *name, uint32_t *size);
+ extern int lavender_modem_fw_read(const char *name, uint32_t off, void *dst,
+     uint32_t len);
+@@ -3052,6 +3053,399 @@ wlan_glink_start(struct smem_part_hdr *part)
+ 	return TRUE;
+ }
+ 
++/* --- F2 step 5c: RPM GLINK and the WCN3990 rails ------------------------ */
++/*
++ * The four icnss supplies are RPM-SMD resources driven through the RPM's
++ * own GLINK edge: a 28 KiB msgram at 0x778000 with a TOC in its last 256
++ * bytes, two FIFOs ("ap2r" TX, "r2ap" RX) and IPC bit 0 in the APCS
++ * register. Bergamota votes these rails at the start of its WLAN stage;
++ * without them the modem's loader fills its buffer and blocks when it
++ * starts writing the firmware to the (dead) WCN3990 (0747/0750 stall at
++ * ~380 KB).
++ */
++#define RPM_MSGRAM_PA     0x778000u
++#define RPM_MSGRAM_SIZE   0x7000u
++#define RPM_TOC_OFF       (RPM_MSGRAM_SIZE - 256u)
++#define RPM_TOC_MAGIC     0x67727430u   /* "grt0" */
++#define RPM_FIFO_AP2R     0x61703272u   /* "ap2r" */
++#define RPM_FIFO_R2AP     0x72326170u   /* "r2ap" */
++#define RPM_IPC_BIT       0u
++#define RPM_LCID          1u
++#define RPM_CHAN          "rpm_requests"
++#define RPM_RSC_LDOA      0x616f646cu   /* "ldoa" */
++#define RPM_KEY_SWEN      0x6e657773u   /* "swen" */
++#define RPM_KEY_PCEN      0x6e656370u   /* "pcen" */
++#define RPM_KEY_PCMD      0x646d6370u   /* "pcmd" */
++#define RPM_KEY_UV        0x7675u       /* "uv" */
++#define RPM_SET_ACTIVE    0u
++#define RPM_SET_SLEEP     1u
++
++static vm_offset_t rpm_va;
++static uint32_t rpm_tx_off, rpm_tx_len, rpm_rx_off, rpm_rx_len;
++static uint32_t rpm_msg_id;
++static boolean_t rpm_open, rpm_ver;
++
++static uint32_t
++rpm_rd32(uint32_t off)
++{
++	return *(volatile uint32_t *)(rpm_va + off);
++}
++
++static void
++rpm_wr32(uint32_t off, uint32_t val)
++{
++	*(volatile uint32_t *)(rpm_va + off) = val;
++	wlan_mb();
++}
++
++static uint8_t
++rpm_rd8(uint32_t off)
++{
++	return *(volatile uint8_t *)(rpm_va + off);
++}
++
++static void
++rpm_wr8(uint32_t off, uint8_t val)
++{
++	*(volatile uint8_t *)(rpm_va + off) = val;
++}
++
++static uint32_t
++rpm_tx_avail(void)
++{
++	uint32_t head = rpm_rd32(rpm_tx_off + 4);
++	uint32_t tail = rpm_rd32(rpm_tx_off);
++
++	return tail <= head ? rpm_tx_len - head + tail : tail - head;
++}
++
++static void
++rpm_tx_put(uint32_t *head, const uint8_t *p, uint32_t n)
++{
++	for (uint32_t i = 0; i < n; i++) {
++		rpm_wr8(rpm_tx_off + 8 + *head, p[i]);
++		if (++*head >= rpm_tx_len) {
++			*head = 0;
++		}
++	}
++}
++
++/* Write one GLINK message into the RPM TX FIFO and kick IPC bit 0. */
++static boolean_t
++rpm_tx(const uint8_t *hdr, uint32_t hlen, const uint8_t *data, uint32_t dlen)
++{
++	uint8_t zero = 0;
++	uint32_t total = hlen + dlen;
++	uint32_t pad = (total + 7) & ~7u;
++	uint32_t head;
++	unsigned n;
++
++	head = rpm_rd32(rpm_tx_off + 4);
++	if (rpm_tx_avail() < pad) {
++		for (n = 0; n < 100 && rpm_tx_avail() < pad; n++) {
++			wlan_wait(1);
++		}
++		head = rpm_rd32(rpm_tx_off + 4);
++		if (rpm_tx_avail() < pad) {
++			printf("SWEET RPM: TX FIFO full (%u need, %u free)\n",
++			    pad, rpm_tx_avail());
++			return FALSE;
++		}
++	}
++	rpm_tx_put(&head, hdr, hlen);
++	if (dlen != 0) {
++		rpm_tx_put(&head, data, dlen);
++	}
++	for (uint32_t i = total; i < pad; i++) {
++		rpm_tx_put(&head, &zero, 1);
++	}
++	rpm_wr32(rpm_tx_off + 4, head);
++	if (apcs != 0) {
++		*(volatile uint32_t *)(apcs + APCS_IPC_OFF) = 1u << RPM_IPC_BIT;
++		wlan_mb();
++	}
++	return TRUE;
++}
++
++static void
++rpm_cmd(uint16_t cmd, uint16_t p1, uint32_t p2)
++{
++	uint8_t h[8];
++
++	h[0] = (uint8_t)cmd;
++	h[1] = (uint8_t)(cmd >> 8);
++	h[2] = (uint8_t)p1;
++	h[3] = (uint8_t)(p1 >> 8);
++	h[4] = (uint8_t)p2;
++	h[5] = (uint8_t)(p2 >> 8);
++	h[6] = (uint8_t)(p2 >> 16);
++	h[7] = (uint8_t)(p2 >> 24);
++	(void)rpm_tx(h, sizeof(h), NULL, 0);
++}
++
++static void
++rpm_data(const uint8_t *data, uint32_t len)
++{
++	uint8_t h[16];
++
++	h[0] = 9;                   /* CMD_TX_DATA */
++	h[1] = 0;
++	h[2] = (uint8_t)RPM_LCID;
++	h[3] = 0;
++	memset(h + 4, 0, 4);        /* intent id: this edge is intentless */
++	h[8] = (uint8_t)len;
++	h[9] = (uint8_t)(len >> 8);
++	h[10] = (uint8_t)(len >> 16);
++	h[11] = (uint8_t)(len >> 24);
++	memset(h + 12, 0, 4);       /* left */
++	(void)rpm_tx(h, sizeof(h), data, len);
++}
++
++static uint32_t
++rpm_rx_avail(void)
++{
++	uint32_t head = rpm_rd32(rpm_rx_off + 4);
++	uint32_t tail = rpm_rd32(rpm_rx_off);
++
++	return head >= tail ? head - tail : rpm_rx_len - tail + head;
++}
++
++static void
++rpm_rx_peek(uint8_t *dst, uint32_t off, uint32_t n)
++{
++	uint32_t t = rpm_rd32(rpm_rx_off) + off;
++
++	if (t >= rpm_rx_len) {
++		t -= rpm_rx_len;
++	}
++	for (uint32_t i = 0; i < n; i++) {
++		dst[i] = rpm_rd8(rpm_rx_off + 8 + t);
++		if (++t >= rpm_rx_len) {
++			t = 0;
++		}
++	}
++}
++
++static void
++rpm_rx_advance(uint32_t n)
++{
++	uint32_t t = rpm_rd32(rpm_rx_off) + n;
++
++	if (t >= rpm_rx_len) {
++		t -= rpm_rx_len;
++	}
++	rpm_wr32(rpm_rx_off, t);
++}
++
++static void
++rpm_poll(void)
++{
++	uint8_t h[16];
++
++	while (rpm_rx_avail() >= 8) {
++		uint16_t cmd;
++		uint32_t p1, p2;
++
++		rpm_rx_peek(h, 0, 8);
++		cmd = (uint16_t)(h[0] | (h[1] << 8));
++		p1 = (uint32_t)h[2] | ((uint32_t)h[3] << 8);
++		p2 = (uint32_t)h[4] | ((uint32_t)h[5] << 8) |
++		    ((uint32_t)h[6] << 16) | ((uint32_t)h[7] << 24);
++		if (cmd == 9 || cmd == 12) {
++			uint32_t chunk, left, n;
++			uint8_t buf[32];
++			uint32_t c;
++
++			if (rpm_rx_avail() < 16) {
++				break;
++			}
++			rpm_rx_peek(h, 0, 16);
++			chunk = (uint32_t)h[8] | ((uint32_t)h[9] << 8) |
++			    ((uint32_t)h[10] << 16) | ((uint32_t)h[11] << 24);
++			left = (uint32_t)h[12] | ((uint32_t)h[13] << 8) |
++			    ((uint32_t)h[14] << 16) | ((uint32_t)h[15] << 24);
++			n = (16 + chunk + 7) & ~7u;
++			if (rpm_rx_avail() < n) {
++				break;
++			}
++			c = MIN(chunk, (uint32_t)sizeof(buf));
++			rpm_rx_peek(buf, 16, c);
++			printf("SWEET RPM: ack %u bytes (left %u): %02x %02x "
++			    "%02x %02x\n", chunk, left, buf[0], buf[1],
++			    buf[2], buf[3]);
++			rpm_rx_advance(n);
++			continue;
++		}
++		switch (cmd) {
++		case 0:         /* VERSION from the RPM */
++			rpm_cmd(1, (uint16_t)p1, p2);   /* VERSION_ACK */
++			rpm_ver = TRUE;
++			printf("SWEET RPM: version %u features %x\n", p1, p2);
++			break;
++		case 1:         /* VERSION_ACK */
++			rpm_ver = TRUE;
++			break;
++		case 4:         /* OPEN_ACK */
++			rpm_open = TRUE;
++			printf("SWEET RPM: channel " RPM_CHAN
++			    " open (rcid %x lcid %x)\n", p1, p2);
++			break;
++		case 5: {       /* INTENT (not expected on this edge) */
++			uint32_t n = (8 + 8 * p2 + 7) & ~7u;
++
++			if (rpm_rx_avail() < n) {
++				return;
++			}
++			rpm_rx_advance(n);
++			continue;
++		}
++		case 3:
++		case 6:
++		case 11:
++			break;
++		default:
++			printf("SWEET RPM: cmd %u p1 %x p2 %x\n", cmd, p1, p2);
++			break;
++		}
++		rpm_rx_advance(8);
++	}
++}
++
++/* One RPM v1 request with u32 KVPs; active or sleep set. */
++static boolean_t
++rpm_request(uint32_t rsc_id, uint32_t set, const uint32_t *keys,
++    const uint32_t *vals, unsigned n)
++{
++	uint8_t b[16 + 6 * 12];
++	uint32_t o = 16, data_len, req_len, hdr, details, id;
++
++	for (unsigned i = 0; i < n; i++) {
++		uint32_t four = 4;
++
++		memcpy(b + o, &keys[i], 4);
++		memcpy(b + o + 4, &four, 4);           /* nbytes, 4-aligned */
++		memcpy(b + o + 8, &vals[i], 4);
++		o += 12;
++	}
++	data_len = o - 16;
++	req_len = data_len + 12;
++	hdr = (req_len & 0xffffu) | (1u << 24);        /* version 1 */
++	details = (data_len & 0xffffu) |
++	    ((rsc_id & 0xfffu) << 16) | ((set & 0xfu) << 28);
++	id = ++rpm_msg_id;
++	memcpy(b, &hdr, 4);
++	memcpy(b + 4, &id, 4);
++	{
++		uint32_t type = RPM_RSC_LDOA;
++
++		memcpy(b + 8, &type, 4);
++	}
++	memcpy(b + 12, &details, 4);
++	printf("SWEET RPM: ldoa%u set %u: %u kvp(s)\n", rsc_id, set, n);
++	return rpm_data(b, o), TRUE;
++}
++
++static void
++wlan_rails_on(void)
++{
++	uint32_t magic, count, i;
++
++	rpm_va = ml_io_map_unmappable(RPM_MSGRAM_PA, RPM_MSGRAM_SIZE,
++	    VM_WIMG_IO);
++	if (rpm_va == 0) {
++		printf("SWEET RPM: msgram map failed\n");
++		return;
++	}
++	magic = rpm_rd32(RPM_TOC_OFF);
++	count = rpm_rd32(RPM_TOC_OFF + 4);
++	printf("SWEET RPM: toc magic %x count %u\n", magic, count);
++	if (magic != RPM_TOC_MAGIC || count > 20) {
++		printf("SWEET RPM: bad TOC\n");
++		return;
++	}
++	for (i = 0; i < count; i++) {
++		uint32_t id = rpm_rd32(RPM_TOC_OFF + 8 + i * 12);
++		uint32_t off = rpm_rd32(RPM_TOC_OFF + 12 + i * 12);
++		uint32_t sz = rpm_rd32(RPM_TOC_OFF + 16 + i * 12);
++
++		if (off + 8 + sz > RPM_MSGRAM_SIZE) {
++			continue;
++		}
++		if (id == RPM_FIFO_AP2R) {
++			rpm_tx_off = off;
++			rpm_tx_len = sz;
++		} else if (id == RPM_FIFO_R2AP) {
++			rpm_rx_off = off;
++			rpm_rx_len = sz;
++		}
++	}
++	printf("SWEET RPM: tx %x+%x rx %x+%x\n", rpm_tx_off, rpm_tx_len,
++	    rpm_rx_off, rpm_rx_len);
++	if (rpm_tx_len == 0 || rpm_rx_len == 0) {
++		printf("SWEET RPM: FIFOs not found\n");
++		return;
++	}
++	rpm_wr32(rpm_tx_off + 4, 0);
++	rpm_wr32(rpm_rx_off, 0);
++	rpm_cmd(0, 0, 0);              /* VERSION (version 0) */
++	{
++		uint8_t open[32];
++		uint32_t name_len = sizeof(RPM_CHAN);
++		uint32_t olen = (8 + name_len + 7) & ~7u;
++
++		memset(open, 0, sizeof(open));
++		open[0] = 2;           /* CMD_OPEN */
++		open[2] = (uint8_t)RPM_LCID;
++		open[4] = (uint8_t)name_len;
++		memcpy(open + 8, RPM_CHAN, name_len);
++		printf("SWEET RPM: open %s (%u bytes)\n", RPM_CHAN, olen);
++		(void)rpm_tx(open, olen, NULL, 0);
++	}
++	for (i = 0; i < 200 && !rpm_open; i++) {
++		rpm_poll();
++		wlan_wait(1);
++	}
++	if (!rpm_open) {
++		printf("SWEET RPM: no OPEN_ACK\n");
++		return;
++	}
++	/*
++	 * ath10k's vreg order for this node: 0.8 (swen), 1.8 (pcen), 1.3
++	 * (pcen), 3.3 (pcen). Values are the min of vdd-*-config from the
++	 * icnss node; pcmd 2 is qcom,init-pin-ctrl-mode.
++	 */
++	{
++		uint32_t k2[3] = { RPM_KEY_PCEN, RPM_KEY_PCMD, RPM_KEY_UV };
++		uint32_t k1[2] = { RPM_KEY_SWEN, RPM_KEY_UV };
++
++		{
++			uint32_t v[2] = { 1, 848000 };
++
++			(void)rpm_request(5, RPM_SET_ACTIVE, k1, v, 2);
++		}
++		{
++			uint32_t v[3] = { 2, 2, 1750000 };
++
++			(void)rpm_request(9, RPM_SET_ACTIVE, k2, v, 3);
++		}
++		{
++			uint32_t v[3] = { 2, 2, 1200000 };
++
++			(void)rpm_request(6, RPM_SET_ACTIVE, k2, v, 3);
++		}
++		{
++			uint32_t v[3] = { 2, 2, 3200000 };
++
++			(void)rpm_request(19, RPM_SET_ACTIVE, k2, v, 3);
++		}
++	}
++	for (i = 0; i < 100; i++) {
++		rpm_poll();
++		wlan_wait(1);
++	}
++	printf("SWEET RPM: rails voted\n");
++}
++
+ /* Called by the modem thread after AUTH_COMPLETE, only for sweetwlan>=2. */
+ void
+ lavender_wlan_after_modem(void)
+@@ -3074,6 +3468,9 @@ lavender_wlan_after_modem(void)
+ 		printf("SWEET WLAN: APCS map failed\n");
+ 	}
+ 
++	/* Power the WCN3990 before the modem's loader needs it. */
++	wlan_rails_on();
++
+ 	wlan_f2_toc((uint8_t *)smem);
+ 
+ 	/*
