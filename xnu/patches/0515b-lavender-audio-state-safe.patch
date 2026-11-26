@@ -1,0 +1,13 @@
+diff --git a/bsd/dev/lavender_audio.c b/bsd/dev/lavender_audio.c
+index 063cd03..988b4d3 100644
+--- a/bsd/dev/lavender_audio.c
++++ b/bsd/dev/lavender_audio.c
+@@ -2736,7 +2736,7 @@ audio_asm_tone(void)
+ 	uint64_t pa;
+ 	int err;
+ 
+-	if (audio_step < 13) {
++	if (audio_step < 13 || audio_step > 14) {
+ 		return;
+ 	}
+ 	audio_announce("ASM tone buffer (16 KiB) and 1 kHz write");

@@ -2736,7 +2736,7 @@ audio_asm_tone(void)
 	uint64_t pa;
 	int err;
 
-	if (audio_step < 13) {
+	if (audio_step < 13 || audio_step > 14) {
 		return;
 	}
 	audio_announce("ASM tone buffer (16 KiB) and 1 kHz write");
