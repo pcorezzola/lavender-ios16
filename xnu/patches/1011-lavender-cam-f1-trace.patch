@@ -1,0 +1,162 @@
+diff --git a/bsd/dev/lavender_cam.c b/bsd/dev/lavender_cam.c
+index ed20caf..fab6a8a 100644
+--- a/bsd/dev/lavender_cam.c
++++ b/bsd/dev/lavender_cam.c
+@@ -18,6 +18,11 @@
+  *                   hand on the CCI pins, printing every address that answers
+  *                   and the two chip IDs it can read; the rails go off again
+  *                   afterwards. Only camera@0 (lvcamsel=0) in this build.
++ *   lvcam=4         the same rails without the PM660L step (VANA and the
++ *                   reset only, VDIG left as found; lvcamsmoke=1 forces
++ *                   this at lvcam=3). 1011 prints one line before every
++ *                   access and gives the flusher 300 ms, so the last line
++ *                   of a frozen boot names the access that wedged it.
+  *   lvcamdelay=S    seconds to wait after boot before the probe (default 25),
+  *                   so the console ring flusher and the USB live log are up
+  *   lvcamsel=0/1/2  the camera the driver works on from F1 on: 0 the rear
+@@ -643,6 +648,7 @@ static uint32_t cam_sda_cfg, cam_sda_io, cam_scl_cfg, cam_scl_io;
+ static struct cam_pad cam_dvdd;
+ static int cam_dvdd_saved;
+ static int cam_rails_on;
++static int cam_no_pmic;
+ 
+ /* A short busy wait: the bit-banged bus needs microseconds, cam_wait() has
+  * the thread sleep for whole milliseconds. */
+@@ -665,11 +671,15 @@ cam_spmi_init(void)
+ 	if (spmi_ready) {
+ 		return 0;
+ 	}
++	printf("SWEET CAM: spmi: mapping the core\n");
++	cam_wait(300);
+ 	spmi_core = ml_io_map(CAM_SPMI_CORE_PA, 0x1000);
+ 	if (spmi_core == 0) {
+ 		printf("SWEET CAM: SPMI core map failed\n");
+ 		return EIO;
+ 	}
++	printf("SWEET CAM: spmi: reading the arbiter version\n");
++	cam_wait(300);
+ 	version = cam_rd(spmi_core, 0);
+ 	if (version < 0x20000000u || version >= 0x50000000u) {
+ 		printf("SWEET CAM: SPMI arbiter %#x unsupported\n", version);
+@@ -801,6 +811,8 @@ cam_pad_write(uint8_t sid, uint16_t periph, uint32_t off, uint8_t val,
+ {
+ 	uint8_t back = 0;
+ 
++	printf("SWEET CAM: spmi: pad %#x write reg %02x = %02x (%s)\n", periph,
++	    off, val, what);
+ 	if (cam_spmi_write(sid, (uint16_t)((periph << 8) | off), val) != 0) {
+ 		return EIO;
+ 	}
+@@ -823,6 +835,9 @@ cam_pad_save(uint8_t sid, uint16_t periph, struct cam_pad *pad)
+ 	unsigned i;
+ 
+ 	for (i = 0; i < 5; i++) {
++		printf("SWEET CAM: spmi: pad %#x read reg %02x\n", periph,
++		    offs[i]);
++		cam_wait(300);
+ 		if (cam_spmi_read(sid, (uint16_t)((periph << 8) | offs[i]),
+ 		    &p[i]) != 0) {
+ 			return EIO;
+@@ -892,7 +907,8 @@ cam_f1_rails_up(void)
+ 		printf("SWEET CAM: lvcam>=3 drives camera@0 only (lvcamsel=0)\n");
+ 		return EINVAL;
+ 	}
+-	cam_announce("power camera@0: reset low, VANA, VDIG, reset high");
++	printf("SWEET CAM: rails step 1: reading the AVDD and reset pins\n");
++	cam_wait(300);
+ 	cam_avdd_cfg = cam_rd(tlmm, CAM_GPIO_AVDD0 * 0x1000u);
+ 	cam_avdd_io = cam_rd(tlmm, CAM_GPIO_AVDD0 * 0x1000u + 4u);
+ 	cam_rst_cfg = cam_rd(tlmm, CAM_GPIO_RESET0 * 0x1000u);
+@@ -901,8 +917,28 @@ cam_f1_rails_up(void)
+ 	    "io %08x\n", CAM_GPIO_AVDD0, cam_avdd_cfg, cam_avdd_io,
+ 	    CAM_GPIO_RESET0, cam_rst_cfg, cam_rst_io);
+ 
++	printf("SWEET CAM: rails step 2: driving reset low\n");
++	cam_wait(300);
+ 	cam_tlmm_drive(CAM_GPIO_RESET0, 0);
++	printf("SWEET CAM: rails step 3: reset io now %08x\n",
++	    cam_rd(tlmm, CAM_GPIO_RESET0 * 0x1000u + 4u));
++	cam_wait(300);
+ 	cam_tlmm_drive(CAM_GPIO_AVDD0, 1);
++	printf("SWEET CAM: rails step 4: VANA io now %08x\n",
++	    cam_rd(tlmm, CAM_GPIO_AVDD0 * 0x1000u + 4u));
++	if (cam_no_pmic) {
++		printf("SWEET CAM: rails: VDIG left alone (lvcamsmoke)\n");
++		cam_wait(5);
++		cam_tlmm_drive(CAM_GPIO_RESET0, 1);
++		cam_wait(10);
++		printf("SWEET CAM: rails: reset io now %08x (no VDIG)\n",
++		    cam_rd(tlmm, CAM_GPIO_RESET0 * 0x1000u + 4u));
++		cam_rails_on = 1;
++		printf("SWEET CAM: camera@0 powered without VDIG\n");
++		return 0;
++	}
++	printf("SWEET CAM: rails step 5: reading the PM660L pad\n");
++	cam_wait(300);
+ 	cam_dvdd_saved = cam_pad_save(CAM_PM660L_SID, CAM_PM660L_DVDD0,
+ 	    &cam_dvdd) == 0;
+ 	if (!cam_dvdd_saved) {
+@@ -915,6 +951,8 @@ cam_f1_rails_up(void)
+ 		cam_wr(tlmm, CAM_GPIO_RESET0 * 0x1000u, cam_rst_cfg);
+ 		return EIO;
+ 	}
++	printf("SWEET CAM: rails step 6: driving VDIG high\n");
++	cam_wait(300);
+ 	err = cam_pad_drive(CAM_PM660L_SID, CAM_PM660L_DVDD0, 1);
+ 	if (err != 0) {
+ 		printf("SWEET CAM: VDIG did not take (%d); powering down\n",
+@@ -927,9 +965,12 @@ cam_f1_rails_up(void)
+ 		cam_pad_restore(CAM_PM660L_SID, CAM_PM660L_DVDD0, &cam_dvdd);
+ 		return err;
+ 	}
++	printf("SWEET CAM: rails step 7: releasing the reset\n");
+ 	cam_wait(5);
+ 	cam_tlmm_drive(CAM_GPIO_RESET0, 1);
+ 	cam_wait(10);
++	printf("SWEET CAM: rails: reset io now %08x\n",
++	    cam_rd(tlmm, CAM_GPIO_RESET0 * 0x1000u + 4u));
+ 	cam_rails_on = 1;
+ 	printf("SWEET CAM: camera@0 powered (reset released)\n");
+ 	return 0;
+@@ -941,10 +982,12 @@ cam_f1_rails_down(void)
+ 	if (!cam_rails_on) {
+ 		return;
+ 	}
+-	cam_announce("power camera@0 down (reset low, rails off)");
++	printf("SWEET CAM: rails down: reset low, then the rails\n");
++	cam_wait(300);
+ 	cam_tlmm_drive(CAM_GPIO_RESET0, 0);
+ 	cam_wait(1);
+ 	if (cam_dvdd_saved) {
++		printf("SWEET CAM: rails down: restoring the PM660L pad\n");
+ 		cam_pad_restore(CAM_PM660L_SID, CAM_PM660L_DVDD0, &cam_dvdd);
+ 	}
+ 	cam_wr(tlmm, CAM_GPIO_AVDD0 * 0x1000u + 4u, cam_avdd_io);
+@@ -952,6 +995,7 @@ cam_f1_rails_down(void)
+ 	cam_wr(tlmm, CAM_GPIO_RESET0 * 0x1000u + 4u, cam_rst_io);
+ 	cam_wr(tlmm, CAM_GPIO_RESET0 * 0x1000u, cam_rst_cfg);
+ 	cam_rails_on = 0;
++	printf("SWEET CAM: rails down done\n");
+ }
+ 
+ /* Open drain on the CCI pins: high is input with the internal pull-up. */
+@@ -1255,7 +1299,7 @@ int
+ lavender_cam_probe(void)
+ {
+ 	static int started;
+-	uint32_t step = 0, sel = 0;
++	uint32_t step = 0, sel = 0, smoke = 0;
+ 	thread_t thread;
+ 
+ 	if (started ||
+@@ -1268,6 +1312,10 @@ lavender_cam_probe(void)
+ 		sel = 0;
+ 	}
+ 	cam_sel = sel;
++	(void)PE_parse_boot_argn("lvcamsmoke", &smoke, sizeof(smoke));
++	if (step >= 4 || smoke != 0) {
++		cam_no_pmic = 1;
++	}
+ 	if (kernel_thread_start(lavender_cam_thread, NULL, &thread) ==
+ 	    KERN_SUCCESS) {
+ 		thread_deallocate(thread);
