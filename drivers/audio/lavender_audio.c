@@ -53,6 +53,7 @@
  *   lavaud=12       also open the ASM stream, route it to the COPP, set the
  *                   media format and run it
  *   lavaud=13       also map a 16 KiB tone buffer and write it with ASM
+ *   lavaud=14       also enable the PM660L speaker PA/boost path
  *   lavaudforce=1   A3: load even if SMEM shows an ADSP from an earlier run
  *   lavaudcopy=0    A3: skip the segment copy (test a preloaded carve-out)
  *   lavaudprobe=1   A3: read the carve-out and print copy progress every 256K
@@ -2327,8 +2328,10 @@ glink_rx_one(void)
 				    ((a->hdr_field >> 4) & 0x0fu) * 4u;
 
 				if ((a->opcode == 0x000110E8u ||
-				    a->opcode == ADM_CMDRSP_DEVICE_OPEN_V5) &&
-				    len >= hdr_bytes + 8) {
+				    a->opcode == ADM_CMDRSP_DEVICE_OPEN_V5 ||
+				    a->opcode ==
+				    ASM_CMDRSP_SHARED_MEM_MAP_REGIONS) &&
+				    len >= hdr_bytes + 4) {
 					const uint8_t *p = buf + hdr_bytes;
 
 					printf("SWEET AUDIO: APR rsp %08x "
@@ -2348,7 +2351,8 @@ glink_rx_one(void)
 						asm_map_handle =
 						    audio_le32(p);
 						asm_map_status =
-						    audio_le32(p + 4);
+						    (len >= hdr_bytes + 8) ?
+						    audio_le32(p + 4) : 0;
 						printf("SWEET AUDIO: ASM map "
 						    "handle %x status %u\n",
 						    asm_map_handle,
@@ -2777,6 +2781,43 @@ audio_asm_tone(void)
 	    glink_tx_msgs, glink_rx_msgs);
 }
 
+/* Read-modify-write one PM660L analog register (the SPMI helper whitelists
+ * only the speaker path). */
+static int
+pm660l_update(uint16_t reg, uint8_t mask, uint8_t val)
+{
+	uint8_t v = 0;
+
+	if (sweet_spmi_lavender_read(3, 0xf000u + reg, &v) != 0) {
+		return -1;
+	}
+	v = (uint8_t)((v & ~mask) | (val & mask));
+	return sweet_spmi_lavender_write(3, 0xf000u + reg, v);
+}
+
+/*
+ * F4: the vendor PM660L speaker PA sequence (PRE/POST_PMU of the SPK PA
+ * widget): analog clock on, VBAT LDO/power stage, RX_EAR enable, then the
+ * SPKR_DRV_CTL power-up and the PA enable bit.
+ */
+static void
+audio_pm660l_speaker(void)
+{
+	if (audio_step < 14) {
+		return;
+	}
+	audio_announce("PM660L speaker PA and boost enable");
+	(void)pm660l_update(0x0049, 0x10, 0x10);   /* CDC_ANA_CLK_CTL */
+	(void)pm660l_update(0x01b5, 0x01, 0x01);   /* SPKR_PWRSTG_CTL */
+	audio_wait(2);
+	(void)pm660l_update(0x01b5, 0xe0, 0xe0);
+	(void)pm660l_update(0x019e, 0x01, 0x01);   /* RX_EAR_CTL */
+	audio_wait(2);
+	(void)pm660l_update(0x01b2, 0xef, 0xef);   /* SPKR_DRV_CTL */
+	(void)pm660l_update(0x01b2, 0x80, 0x80);   /* SPK PA enable */
+	printf("SWEET AUDIO: PM660L speaker PA writes done\n");
+}
+
 /*
  * F4: PM660L analog codec read-only probe. The codec is the SPMI device at
  * SID 3, base 0xf000 (vendor msm-analog-cdc.c); the lavender observer read
@@ -3203,6 +3244,9 @@ lavender_audio_thread(__unused void *arg, __unused wait_result_t wr)
 	}
 	if (audio_step >= 13) {
 		audio_asm_tone();
+	}
+	if (audio_step >= 14) {
+		audio_pm660l_speaker();
 	}
 
 	printf("SWEET AUDIO: probe done (lavaud=%u)\n", audio_step);
