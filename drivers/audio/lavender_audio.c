@@ -2841,7 +2841,7 @@ pm660l_update(uint16_t reg, uint8_t mask, uint8_t val)
 static void
 audio_pm660l_speaker(void)
 {
-	if (audio_step != 14) {
+	if (audio_step < 14) {
 		return;
 	}
 	audio_announce("PM660L clock block + speaker PA/boost enable");
@@ -2887,6 +2887,25 @@ audio_pm660l_state(void)
 	}
 	printf("SWEET AUDIO: LPASS mclk 0x15020018 = %08x pinctrl 0x0 "
 	    "= %08x\n", audio_rd(mclk, 0x18), audio_rd(pinctrl, 0x0));
+}
+
+/* F5 read-only: the LPASS digital codec registers that feed PDM_OUT_RX3. */
+static void
+audio_dig_state(void)
+{
+	static const uint16_t regs[] = {
+		0x00c, 0x024, 0x028, 0x094, 0x09c, 0x0a4, 0x198,
+	};
+
+	if (audio_step < 15) {
+		return;
+	}
+	audio_announce("LPASS digital codec state (read only)");
+	for (uint32_t i = 0; i < sizeof(regs) / sizeof(regs[0]); i++) {
+		printf("SWEET AUDIO: DIG[%03x] = %02x\n", regs[i],
+		    audio_rd(codec, regs[i]) & 0xffu);
+		audio_wait(10);
+	}
 }
 
 /*
@@ -3321,6 +3340,7 @@ lavender_audio_thread(__unused void *arg, __unused wait_result_t wr)
 	}
 	if (audio_step >= 15) {
 		audio_pm660l_state();
+		audio_dig_state();
 	}
 
 	printf("SWEET AUDIO: probe done (lavaud=%u)\n", audio_step);
