@@ -31,7 +31,10 @@
  *                   helper only, so one boot shows whether the arbiter
  *                   answers before this probe touches anything. 1013 stops
  *                   unmapping: ml_io_unmap() panics in this port
- *                   (pmap_remove_options: invalid address range).
+ *                   (pmap_remove_options: invalid address range). 1014 first
+ *                   prints the register set of PM660L pads 0xc0-0xc7 and
+ *                   accepts type 0x01 (what this PM660L returns) as GPIO, so
+ *                   F1 drives VDIG instead of aborting.
  *   lvcamsel=0/1/2  the camera the driver works on from F1 on: 0 the rear
  *                   main (camera@0, csiphy0/csid0, CCI master 0), 1 the
  *                   second rear (camera@1, csiphy1/csid1, master 1, has
@@ -630,6 +633,7 @@ cam_smmu(void)
 #define CAM_PM660L_DVDD0        0x00c2u          /* pad 3 -> 0xc000 + 2*0x100 */
 #define CAM_PMIC_GPIO_TYPE      0x04u
 #define CAM_PMIC_GPIO_TYPE_GPIO 0x10u
+#define CAM_PMIC_GPIO_TYPE_GPIO_PM660L 0x01u     /* read back on this PM660L */
 #define CAM_PMIC_GPIO_RT_STS    0x10u            /* bit0: digital input level */
 #define CAM_PMIC_GPIO_MODE      0x40u            /* bit0 out, 3:1 fun, 6:4 dir */
 #define CAM_PMIC_GPIO_VIN       0x41u
@@ -851,13 +855,43 @@ cam_pad_save(uint8_t sid, uint16_t periph, struct cam_pad *pad)
 	printf("SWEET CAM: pm660l pad %#x as found: type %02x rt_sts %02x "
 	    "mode %02x vin %02x en %02x\n", periph, pad->type, pad->rtsts,
 	    pad->mode, pad->vin, pad->en);
-	if (pad->type != CAM_PMIC_GPIO_TYPE_GPIO) {
+	/* The mainline spmi-gpio driver wants 0x10 here, but the PM660L pads
+	 * read 0x01 (the pad scan shows whether the known-good volume-up pad
+	 * 0xc6 reads the same); accept both. */
+	if (pad->type != CAM_PMIC_GPIO_TYPE_GPIO &&
+	    pad->type != CAM_PMIC_GPIO_TYPE_GPIO_PM660L) {
 		printf("SWEET CAM: pm660l pad %#x is not a GPIO (type %02x, "
-		    "want %02x); not touched\n", periph, pad->type,
-		    CAM_PMIC_GPIO_TYPE_GPIO);
+		    "want %02x or %02x); not touched\n", periph, pad->type,
+		    CAM_PMIC_GPIO_TYPE_GPIO, CAM_PMIC_GPIO_TYPE_GPIO_PM660L);
 		return EIO;
 	}
 	return 0;
+}
+
+/* 1014: print the GPIO register set of pads 0xc0-0xc7 (pins 1-8). Pin 7
+ * (0xc6) is the volume-up pad the keys driver uses, so its values say what a
+ * working PM660L GPIO looks like on this phone. */
+static void
+cam_pad_scan(void)
+{
+	static const uint8_t offs[] = { 0x04u, 0x05u, 0x40u, 0x41u, 0x46u };
+	unsigned pad, i;
+	uint8_t v;
+
+	printf("SWEET CAM: pad scan 0xc0-0xc7 (type sub mode vin en)\n");
+	for (pad = 0xc0u; pad <= 0xc7u; pad++) {
+		printf("SWEET CAM: pad %#x:", pad);
+		for (i = 0; i < CAM_NITEMS(offs); i++) {
+			v = 0xff;
+			if (cam_spmi_read(CAM_PM660L_SID,
+			    (uint16_t)((pad << 8) | offs[i]), &v) != 0) {
+				printf(" %02x=E", offs[i]);
+			} else {
+				printf(" %02x=%02x", offs[i], v);
+			}
+		}
+		printf("\n");
+	}
 }
 
 static int
@@ -1214,6 +1248,7 @@ cam_f1_scan(void)
 static void
 cam_f1(void)
 {
+	cam_pad_scan();
 	if (cam_f1_rails_up() != 0) {
 		return;
 	}
