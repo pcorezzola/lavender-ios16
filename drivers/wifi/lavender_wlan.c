@@ -3086,6 +3086,7 @@ static vm_offset_t rpm_va;
 static uint32_t rpm_tx_off, rpm_tx_len, rpm_rx_off, rpm_rx_len;
 static uint32_t rpm_msg_id;
 static boolean_t rpm_open, rpm_ver;
+static boolean_t rpm_rails_done;
 
 static uint32_t
 rpm_rd32(uint32_t off)
@@ -3352,6 +3353,10 @@ wlan_rails_on(void)
 {
 	uint32_t magic, count, i;
 
+	if (rpm_rails_done) {
+		return;
+	}
+	rpm_rails_done = TRUE;
 	rpm_va = ml_io_map_wcomb(RPM_MSGRAM_PA, RPM_MSGRAM_SIZE);
 	if (rpm_va == 0) {
 		printf("SWEET RPM: msgram map failed\n");
@@ -3644,6 +3649,17 @@ lavender_wlan_thread(__unused void *arg, __unused wait_result_t wr_)
 		delay_s = 300;
 	}
 	if (wlan_mode >= 2) {
+		/*
+		 * 0755: vote the WCN3990 rails before the modem boots, so
+		 * the RPM trace (and any panic) lands in the NCM log before
+		 * it dies at the SMP2P READY loop (t~130).
+		 */
+		printf("SWEET WLAN: F2 early RPM rails, before the modem\n");
+		apcs = ml_io_map(APCS_PA, APCS_SIZE);
+		if (apcs == 0) {
+			printf("SWEET WLAN: APCS map failed\n");
+		}
+		wlan_rails_on();
 		printf("SWEET WLAN: F2 probe waits for the modem auth\n");
 		return;
 	}
