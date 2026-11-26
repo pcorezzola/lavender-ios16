@@ -1,0 +1,43 @@
+diff --git a/bsd/dev/lavender_audio.c b/bsd/dev/lavender_audio.c
+index d19d482..8b0225e 100644
+--- a/bsd/dev/lavender_audio.c
++++ b/bsd/dev/lavender_audio.c
+@@ -47,7 +47,7 @@
+  *                   peripheral 0xf0) read-only
+  *   lavaud=9        also test the guarded SPMI write path on the PM660L DIG
+  *                   spare register 0xf070 (write/read-back/restore)
+- *   lavaud=10       also configure and start the AFE INT4_MI2S_RX port 0x1036
++ *   lavaud=10       also configure and start the AFE INT0_MI2S_RX port 0x102e
+  *                   over APR (I2S 48 kHz/16-bit/SD0, then DEVICE_START)
+  *   lavaud=11       also open an ADM playback device path (COPP) to 0x1036
+  *   lavaud=12       also open the ASM stream, route it to the COPP, set the
+@@ -322,9 +322,9 @@ struct smp2p_entry {
+ #define AFE_PARAM_ID_I2S_CONFIG        0x0001020Du
+ #define AFE_MODULE_CLOCK_SET           0x0001028Fu
+ #define AFE_PARAM_ID_CLOCK_SET         0x00010290u
+-#define AFE_CLK_INT4_MI2S_IBIT         0x00000113u
++#define AFE_CLK_INT4_MI2S_IBIT         0x0000010Fu /* primary MI2S (DT pri_mi2s) */
+ #define AFE_CLK_INT_MCLK_1             0x00000306u
+-#define AFE_PORT_INT4_MI2S_RX          0x1036u
++#define AFE_PORT_INT4_MI2S_RX          0x102Eu /* primary MI2S (DT pri_mi2s) */
+ 
+ /* ADM, F6: the playback device path (COPP) to the AFE port. */
+ #define APR_SVC_ASM                    7u
+@@ -2506,7 +2506,7 @@ audio_glink_apr(void)
+ }
+ 
+ /*
+- * F5: AFE INT4_MI2S_RX. SET_PARAM_V2 carries the I2S configuration (48 kHz,
++ * F5: AFE INT0_MI2S_RX. SET_PARAM_V2 carries the I2S configuration (48 kHz,
+  * 16-bit, SD0, stereo, internal WS), then DEVICE_START starts the port.
+  */
+ static void
+@@ -2534,7 +2534,7 @@ audio_afe_port(void)
+ 	if (audio_step < 10) {
+ 		return;
+ 	}
+-	audio_announce("AFE INT4_MI2S_RX (0x1036) clock, I2S config and start");
++	audio_announce("AFE INT0_MI2S_RX (0x102e) clock, I2S config and start");
+ 
+ 	/* The MI2S bit clock: 48 kHz * 16 bits * 2 channels = 1.536 MHz. */
+ 	memset(&clk_pkt, 0, sizeof(clk_pkt));
