@@ -421,6 +421,8 @@ static unsigned glink_intent_log;
 static uint32_t adm_status, adm_copp;
 static uint32_t asm_map_handle, asm_map_status;
 static volatile uint32_t asm_write_done;
+static uint32_t afe_vote_handle;
+static volatile uint32_t afe_vote_seen;
 
 static inline uint32_t
 audio_rd(vm_offset_t base, uint32_t off)
@@ -2365,6 +2367,14 @@ glink_rx_one(void)
 						    asm_map_status);
 					}
 				}
+				if (a->opcode == 0x000100F5u &&
+				    len >= hdr_bytes + 4) {
+					afe_vote_handle =
+					    audio_le32(buf + hdr_bytes);
+					afe_vote_seen = 1;
+					printf("SWEET AUDIO: AFE vote "
+					    "handle %x\n", afe_vote_handle);
+				}
 				printf("SWEET AUDIO: APR raw len %u pkt %u "
 				    "hdr %04x chunk %u:", len, a->pkt_size,
 				    a->hdr_field, h.chunk);
@@ -2820,7 +2830,7 @@ pm660l_update(uint16_t reg, uint8_t mask, uint8_t val)
 static void
 audio_pm660l_speaker(void)
 {
-	if (audio_step < 14) {
+	if (audio_step != 14) {
 		return;
 	}
 	audio_announce("PM660L clock block + speaker PA/boost enable");
@@ -2873,6 +2883,39 @@ audio_pm660l_state(void)
 	    "= %08x\n", audio_rd(mclk, 0x18), audio_rd(pinctrl, 0x0));
 }
 
+/*
+ * AFE remote LPASS core hardware vote (vendor afe_vote_lpass_core_hw):
+ * opcode 0x100f4, payload {u32 hw_block_id, char client_name[8]}, response
+ * 0x100f5 with {u32 client_handle}.  Blocks: MACRO=3, DCODEC=4.
+ */
+static int
+audio_afe_vote(uint32_t block, const char *name, uint32_t token)
+{
+	struct {
+		uint32_t block;
+		char name[8];
+	} __attribute__((packed)) vote;
+	uint32_t ms;
+
+	memset(&vote, 0, sizeof(vote));
+	vote.block = block;
+	for (uint32_t i = 0; i < 7 && name[i] != '\0'; i++) {
+		vote.name[i] = name[i];
+	}
+	afe_vote_seen = 0;
+	afe_vote_handle = 0;
+	(void)glink_send_apr_pkt(APR_SVC_AFE, 0, 0, 0x000100F4u, &vote,
+	    sizeof(vote), token);
+	for (ms = 0; ms < 1000 && !afe_vote_seen; ms += 10) {
+		while (glink_rx_one()) {
+		}
+		audio_wait(10);
+	}
+	printf("SWEET AUDIO: AFE vote block %u handle %x (seen %u)\n",
+	    block, afe_vote_handle, afe_vote_seen);
+	return afe_vote_seen ? 0 : -1;
+}
+
 /* Read-only: the LPASS SoundWire master registers (0x152c1000). */
 static void
 audio_swr_state(void)
@@ -2883,7 +2926,13 @@ audio_swr_state(void)
 	if (audio_step < 15) {
 		return;
 	}
-	audio_announce("LPASS SoundWire master state (read only)");
+	audio_announce("LPASS core HW votes and SoundWire master state");
+	audio_wr(mclk, 0x18, 1);
+	printf("SWEET AUDIO: LPASS MCLK 0x15020018 -> %08x\n",
+	    audio_rd(mclk, 0x18));
+	(void)audio_afe_vote(3, "LPASS_H", 30);   /* MACRO */
+	(void)audio_afe_vote(4, "LPASS_D", 31);   /* DCODEC */
+	audio_wait(5);
 	for (uint32_t i = 0; i < sizeof(regs) / sizeof(regs[0]); i++) {
 		printf("SWEET AUDIO: SWR[%04x] = %08x\n", regs[i],
 		    audio_rd(codec, 0x1000 + regs[i]));
