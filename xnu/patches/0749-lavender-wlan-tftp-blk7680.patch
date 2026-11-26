@@ -1,0 +1,37 @@
+diff --git a/bsd/dev/lavender_wlan.c b/bsd/dev/lavender_wlan.c
+index 7cdcf64..eeaf525 100644
+--- a/bsd/dev/lavender_wlan.c
++++ b/bsd/dev/lavender_wlan.c
+@@ -1465,14 +1465,17 @@ wlan_tftp_req(uint32_t node, uint32_t port, const uint8_t *d, uint32_t len)
+ 			s->has_seek = TRUE;
+ 		}
+ 	}
++	printf("SWEET WLAN: tftp asked blk %u wsize %u rsize %u\n", s->blk,
++	    s->wsize, s->rsize);
+ 	/*
+-	 * 0747: OACKs (~80 B) reach the TFTP client but 4096- and
+-	 * 1024-byte DATA (~4132 and ~1060 B) never do, so the limit is
+-	 * the client's QRTR RX buffer. 448 bytes keeps the whole packet
+-	 * under 512 B (the smallest non-control intent the modem grants).
++	 * 0749: the eloader asked for 7680 and bergamota serves it and
++	 * completes; our 448/1024 blocks stall around block 800 (the
++	 * client's internal block limit or buffer). 7680 makes the whole
++	 * 3859712-byte file only 503 blocks, and 7716 bytes fit the
++	 * 8320-byte intent the modem grants.
+ 	 */
+-	if (s->blk > 448) {
+-		s->blk = 448;
++	if (s->blk > 7680) {
++		s->blk = 7680;
+ 	}
+ 	/*
+ 	 * Each DATA also carries a GLINK data header (8 B), a QRTR header
+@@ -1674,7 +1677,7 @@ wlan_tftp_tick(uint32_t ms)
+ 		if (!s->used || s->write || s->sent == 0) {
+ 			continue;       /* waiting for ACK 0: do not send early */
+ 		}
+-		if (ms - s->last_ms < 1500) {
++		if (ms - s->last_ms < 100) {
+ 			continue;
+ 		}
+ 		s->last_ms = ms;
