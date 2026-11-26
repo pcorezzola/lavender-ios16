@@ -2873,6 +2873,23 @@ audio_pm660l_state(void)
 	    "= %08x\n", audio_rd(mclk, 0x18), audio_rd(pinctrl, 0x0));
 }
 
+/* Read-only: the LPASS SoundWire master registers (0x152c1000). */
+static void
+audio_swr_state(void)
+{
+	static const uint16_t regs[] = { 0x000, 0x004, 0x008, 0x00c, 0x010,
+		0x020, 0x100, 0x104 };
+
+	if (audio_step < 15) {
+		return;
+	}
+	audio_announce("LPASS SoundWire master state (read only)");
+	for (uint32_t i = 0; i < sizeof(regs) / sizeof(regs[0]); i++) {
+		printf("SWEET AUDIO: SWR[%04x] = %08x\n", regs[i],
+		    audio_rd(codec, 0x1000 + regs[i]));
+		audio_wait(10);
+	}
+}
 /* F5 read-only: the LPASS digital codec registers that feed PDM_OUT_RX3. */
 static void
 audio_dig_state(void)
@@ -3324,7 +3341,7 @@ lavender_audio_thread(__unused void *arg, __unused wait_result_t wr)
 	}
 	if (audio_step >= 15) {
 		audio_pm660l_state();
-		audio_dig_state();
+		audio_swr_state();
 	}
 
 	printf("SWEET AUDIO: probe done (lavaud=%u)\n", audio_step);
