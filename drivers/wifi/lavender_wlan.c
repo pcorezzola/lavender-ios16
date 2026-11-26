@@ -1468,14 +1468,13 @@ wlan_tftp_req(uint32_t node, uint32_t port, const uint8_t *d, uint32_t len)
 	printf("SWEET WLAN: tftp asked blk %u wsize %u rsize %u\n", s->blk,
 	    s->wsize, s->rsize);
 	/*
-	 * 0749: the eloader asked for 7680 and bergamota serves it and
-	 * completes; our 448/1024 blocks stall around block 800 (the
-	 * client's internal block limit or buffer). 7680 makes the whole
-	 * 3859712-byte file only 503 blocks, and 7716 bytes fit the
-	 * 8320-byte intent the modem grants.
+	 * 0750: back to 448 (packet ~484, known to reach the client) while
+	 * testing the one-window-per-closing-ACK flow; 7680 DATA never
+	 * reached the client and 4096/1024 were only tried with the old
+	 * ACK-multiplying window.
 	 */
-	if (s->blk > 7680) {
-		s->blk = 7680;
+	if (s->blk > 448) {
+		s->blk = 448;
 	}
 	/*
 	 * Each DATA also carries a GLINK data header (8 B), a QRTR header
@@ -1607,19 +1606,19 @@ wlan_tftp_sess_rx(uint32_t port, uint32_t src_port, const uint8_t *d,
 		if (block >= s->last_ack) {
 			s->last_ack = block;    /* never move backwards */
 		}
-		/*
-		 * A queued DATA of this session is stale once its ACK
-		 * arrives: drop it so the retransmission starts now and
-		 * not after the client's 1 s timeout.
-		 */
-		if (q_pending_len != 0 && q_pending_dport == s->port) {
-			q_pending_len = 0;
-		}
 		if (block == 0) {
 			wlan_tftp_window(s, 1);
-		} else if (block < s->sent) {
-			wlan_tftp_window(s, block + 1); /* cumulative ACK */
-		} else if (block == s->sent) {
+		} else if (block >= s->sent) {
+			/*
+			 * 0750: only the ACK that closes the window starts
+			 * the next one. Sending a fresh 10-block window for
+			 * every intermediate ACK multiplied the traffic by
+			 * wsize, filled the intents and stalled the link
+			 * (0748 died at ~block 800); the timer covers holes.
+			 */
+			if (q_pending_len != 0 && q_pending_dport == s->port) {
+				q_pending_len = 0;
+			}
 			if (s->last) {
 				printf("SWEET WLAN: tftp %s done (%u bytes)\n",
 				    s->name, s->size);
