@@ -1,0 +1,28 @@
+diff --git a/bsd/dev/lavender_wlan.c b/bsd/dev/lavender_wlan.c
+index 9333478..c387291 100644
+--- a/bsd/dev/lavender_wlan.c
++++ b/bsd/dev/lavender_wlan.c
+@@ -3650,10 +3650,20 @@ lavender_wlan_thread(__unused void *arg, __unused wait_result_t wr_)
+ 	}
+ 	if (wlan_mode >= 2) {
+ 		/*
+-		 * 0755: vote the WCN3990 rails before the modem boots, so
+-		 * the RPM trace (and any panic) lands in the NCM log before
+-		 * it dies at the SMP2P READY loop (t~130).
++		 * 0756: vote the WCN3990 rails after the NCM capture is up
++		 * (t~10-60) but before the modem's WLAN PD starts (t~150),
++		 * so the RPM trace and any panic land in the shared log.
++		 * At t~2 the panic happened before USB existed (0755).
+ 		 */
++		uint32_t rpm_delay = 75;
++
++		(void)PE_parse_boot_argn("sweetrpmmdelay", &rpm_delay,
++		    sizeof(rpm_delay));
++		if (rpm_delay > 200) {
++			rpm_delay = 200;
++		}
++		printf("SWEET WLAN: F2 RPM rails in %u s\n", rpm_delay);
++		wlan_wait(rpm_delay * 1000);
+ 		printf("SWEET WLAN: F2 early RPM rails, before the modem\n");
+ 		apcs = ml_io_map(APCS_PA, APCS_SIZE);
+ 		if (apcs == 0) {
