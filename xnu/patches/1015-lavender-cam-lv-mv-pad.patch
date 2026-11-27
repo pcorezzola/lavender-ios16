@@ -1,0 +1,143 @@
+diff --git a/bsd/dev/lavender_cam.c b/bsd/dev/lavender_cam.c
+index 9a819e0..f437278 100644
+--- a/bsd/dev/lavender_cam.c
++++ b/bsd/dev/lavender_cam.c
+@@ -34,7 +34,9 @@
+  *                   (pmap_remove_options: invalid address range). 1014 first
+  *                   prints the register set of PM660L pads 0xc0-0xc7 and
+  *                   accepts type 0x01 (what this PM660L returns) as GPIO, so
+- *                   F1 drives VDIG instead of aborting.
++ *                   F1 drives VDIG instead of aborting. 1015 drives LV/MV
++ *                   pads (VDIG is subtype 0x10) the way mainline does: mode
++ *                   in MODE_CTL, the value in DIG_OUT_SOURCE_CTL bit 7.
+  *   lvcamsel=0/1/2  the camera the driver works on from F1 on: 0 the rear
+  *                   main (camera@0, csiphy0/csid0, CCI master 0), 1 the
+  *                   second rear (camera@1, csiphy1/csid1, master 1, has
+@@ -634,12 +636,23 @@ cam_smmu(void)
+ #define CAM_PMIC_GPIO_TYPE      0x04u
+ #define CAM_PMIC_GPIO_TYPE_GPIO 0x10u
+ #define CAM_PMIC_GPIO_TYPE_GPIO_PM660L 0x01u     /* read back on this PM660L */
++#define CAM_PMIC_GPIO_SUBTYPE   0x05u
+ #define CAM_PMIC_GPIO_RT_STS    0x10u            /* bit0: digital input level */
+ #define CAM_PMIC_GPIO_MODE      0x40u            /* bit0 out, 3:1 fun, 6:4 dir */
+ #define CAM_PMIC_GPIO_VIN       0x41u
++#define CAM_PMIC_GPIO_OUT_SRC   0x44u            /* LV/MV: invert bit7 + source */
+ #define CAM_PMIC_GPIO_EN        0x46u            /* bit7 master enable */
+ #define CAM_PMIC_GPIO_EN_BIT    0x80u
+-#define CAM_PMIC_GPIO_OUT_HIGH  0x11u            /* dir out (1<<4) | value */
++#define CAM_PMIC_GPIO_OUT_HIGH  0x11u            /* classic: dir out | value */
++/* Subtypes 0x10..0x15 are the LV/MV pads: MODE_CTL only takes the mode
++ * (1 = digital output) and the output value goes in DIG_OUT_SOURCE_CTL. */
++#define CAM_PMIC_GPIO_SUBTYPE_LV 0x10u
++#define CAM_PMIC_GPIO_SUBTYPE_MV 0x11u
++#define CAM_PMIC_GPIO_SUBTYPE_LV_VIN2 0x12u
++#define CAM_PMIC_GPIO_SUBTYPE_MV_VIN3 0x13u
++#define CAM_PMIC_GPIO_SUBTYPE_LV_VIN2_CLK 0x14u
++#define CAM_PMIC_GPIO_SUBTYPE_MV_VIN3_CLK 0x15u
++#define CAM_PMIC_GPIO_LV_MV_OUT_HIGH 0x80u      /* out value in bit7 */
+ 
+ /* TLMM bit layout of an sdm660 pad (see the top of the file). */
+ #define CAM_TLMM_OE             (1u << 9)
+@@ -653,9 +666,19 @@ cam_smmu(void)
+ 
+ 
+ struct cam_pad {
+-	uint8_t type, rtsts, mode, vin, en;
++	uint8_t type, subtype, rtsts, mode, vin, out_src, en;
+ };
+ 
++/* LV/MV pads (the PM660L camera pads are 0x10/0x11) use a different
++ * MODE_CTL layout: bits 1:0 are the mode and the output value lives in
++ * DIG_OUT_SOURCE_CTL bit 7 (mainline pmic_gpio_set_mux). */
++static int
++cam_pad_is_lv_mv(const struct cam_pad *pad)
++{
++	return pad->subtype >= CAM_PMIC_GPIO_SUBTYPE_LV &&
++	    pad->subtype <= CAM_PMIC_GPIO_SUBTYPE_MV_VIN3_CLK;
++}
++
+ static vm_offset_t spmi_core;
+ static int spmi_ready;
+ static uint32_t cam_avdd_cfg, cam_avdd_io, cam_rst_cfg, cam_rst_io;
+@@ -839,11 +862,11 @@ cam_pad_save(uint8_t sid, uint16_t periph, struct cam_pad *pad)
+ {
+ 	uint8_t *p = (uint8_t *)pad;
+ 	static const uint8_t offs[] = { CAM_PMIC_GPIO_TYPE,
+-	    CAM_PMIC_GPIO_RT_STS, CAM_PMIC_GPIO_MODE, CAM_PMIC_GPIO_VIN,
+-	    CAM_PMIC_GPIO_EN };
++	    CAM_PMIC_GPIO_SUBTYPE, CAM_PMIC_GPIO_RT_STS, CAM_PMIC_GPIO_MODE,
++	    CAM_PMIC_GPIO_VIN, CAM_PMIC_GPIO_OUT_SRC, CAM_PMIC_GPIO_EN };
+ 	unsigned i;
+ 
+-	for (i = 0; i < 5; i++) {
++	for (i = 0; i < CAM_NITEMS(offs); i++) {
+ 		printf("SWEET CAM: spmi: pad %#x read reg %02x\n", periph,
+ 		    offs[i]);
+ 		cam_wait(300);
+@@ -852,9 +875,10 @@ cam_pad_save(uint8_t sid, uint16_t periph, struct cam_pad *pad)
+ 			return EIO;
+ 		}
+ 	}
+-	printf("SWEET CAM: pm660l pad %#x as found: type %02x rt_sts %02x "
+-	    "mode %02x vin %02x en %02x\n", periph, pad->type, pad->rtsts,
+-	    pad->mode, pad->vin, pad->en);
++	printf("SWEET CAM: pm660l pad %#x as found: type %02x subtype %02x "
++	    "rt_sts %02x mode %02x vin %02x out_src %02x en %02x\n", periph,
++	    pad->type, pad->subtype, pad->rtsts, pad->mode, pad->vin,
++	    pad->out_src, pad->en);
+ 	/* The mainline spmi-gpio driver wants 0x10 here, but the PM660L pads
+ 	 * read 0x01 (the pad scan shows whether the known-good volume-up pad
+ 	 * 0xc6 reads the same); accept both. */
+@@ -874,11 +898,12 @@ cam_pad_save(uint8_t sid, uint16_t periph, struct cam_pad *pad)
+ static void
+ cam_pad_scan(void)
+ {
+-	static const uint8_t offs[] = { 0x04u, 0x05u, 0x40u, 0x41u, 0x46u };
++	static const uint8_t offs[] = { 0x04u, 0x05u, 0x40u, 0x41u, 0x44u,
++	    0x46u };
+ 	unsigned pad, i;
+ 	uint8_t v;
+ 
+-	printf("SWEET CAM: pad scan 0xc0-0xc7 (type sub mode vin en)\n");
++	printf("SWEET CAM: pad scan 0xc0-0xc7 (type sub mode vin osrc en)\n");
+ 	for (pad = 0xc0u; pad <= 0xc7u; pad++) {
+ 		printf("SWEET CAM: pad %#x:", pad);
+ 		for (i = 0; i < CAM_NITEMS(offs); i++) {
+@@ -899,10 +924,22 @@ cam_pad_drive(uint8_t sid, uint16_t periph, int high)
+ {
+ 	uint8_t level = 0;
+ 
+-	if (cam_pad_write(sid, periph, CAM_PMIC_GPIO_VIN, 0x00, "vin") != 0 ||
+-	    cam_pad_write(sid, periph, CAM_PMIC_GPIO_MODE, high ?
+-	    CAM_PMIC_GPIO_OUT_HIGH : 0x10u, "mode") != 0 ||
+-	    cam_pad_write(sid, periph, CAM_PMIC_GPIO_EN,
++	if (cam_pad_write(sid, periph, CAM_PMIC_GPIO_VIN, 0x00, "vin") != 0) {
++		return EIO;
++	}
++	if (cam_pad_is_lv_mv(&cam_dvdd)) {
++		if (cam_pad_write(sid, periph, CAM_PMIC_GPIO_MODE, 0x01u,
++		    "mode lv out") != 0 ||
++		    cam_pad_write(sid, periph, CAM_PMIC_GPIO_OUT_SRC,
++		    high ? CAM_PMIC_GPIO_LV_MV_OUT_HIGH : 0x00u,
++		    "out src") != 0) {
++			return EIO;
++		}
++	} else if (cam_pad_write(sid, periph, CAM_PMIC_GPIO_MODE, high ?
++	    CAM_PMIC_GPIO_OUT_HIGH : 0x10u, "mode") != 0) {
++		return EIO;
++	}
++	if (cam_pad_write(sid, periph, CAM_PMIC_GPIO_EN,
+ 	    (uint8_t)(cam_dvdd.en | CAM_PMIC_GPIO_EN_BIT), "en") != 0) {
+ 		return EIO;
+ 	}
+@@ -919,6 +956,10 @@ cam_pad_restore(uint8_t sid, uint16_t periph, const struct cam_pad *pad)
+ {
+ 	(void)cam_pad_write(sid, periph, CAM_PMIC_GPIO_VIN, pad->vin, "vin");
+ 	(void)cam_pad_write(sid, periph, CAM_PMIC_GPIO_MODE, pad->mode, "mode");
++	if (cam_pad_is_lv_mv(pad)) {
++		(void)cam_pad_write(sid, periph, CAM_PMIC_GPIO_OUT_SRC,
++		    pad->out_src, "out src");
++	}
+ 	(void)cam_pad_write(sid, periph, CAM_PMIC_GPIO_EN, pad->en, "en");
+ }
+ 
