@@ -3087,6 +3087,7 @@ static uint32_t rpm_tx_off, rpm_tx_len, rpm_rx_off, rpm_rx_len;
 static uint32_t rpm_msg_id;
 static boolean_t rpm_open, rpm_ver;
 static boolean_t rpm_rails_done;
+static boolean_t rpm_kick = TRUE;
 
 static uint32_t
 rpm_rd32(uint32_t off)
@@ -3163,7 +3164,7 @@ rpm_tx(const uint8_t *hdr, uint32_t hlen, const uint8_t *data, uint32_t dlen)
 		rpm_tx_put(&head, &zero, 1);
 	}
 	rpm_wr32(rpm_tx_off + 4, head);
-	if (apcs != 0) {
+	if (apcs != 0 && rpm_kick) {
 		*(volatile uint32_t *)(apcs + APCS_IPC_OFF) = 1u << RPM_IPC_BIT;
 		wlan_mb();
 	}
@@ -3399,37 +3400,36 @@ wlan_rails_on(void)
 		printf("SWEET RPM: FIFOs not found\n");
 		return;
 	}
-	printf("SWEET RPM: reset tx head\n");
-	rpm_wr32(rpm_tx_off + 4, 0);
-	printf("SWEET RPM: reset rx tail\n");
-	rpm_wr32(rpm_rx_off, 0);
-	printf("SWEET RPM: send version\n");
-	rpm_cmd(0, 0, 0);              /* VERSION (version 0) */
-	printf("SWEET RPM: version sent\n");
-	{
-		uint8_t open[32];
-		uint32_t name_len = sizeof(RPM_CHAN);
-		uint32_t olen = (8 + name_len + 7) & ~7u;
-
-		memset(open, 0, sizeof(open));
-		open[0] = 2;           /* CMD_OPEN */
-		open[2] = (uint8_t)RPM_LCID;
-		open[4] = (uint8_t)name_len;
-		memcpy(open + 8, RPM_CHAN, name_len);
-		printf("SWEET RPM: open %s (%u bytes)\n", RPM_CHAN, olen);
-		(void)rpm_tx(open, olen, NULL, 0);
-		printf("SWEET RPM: rx head %x tail %x avail %u\n",
-		    rpm_rd32(rpm_rx_off + 4), rpm_rd32(rpm_rx_off),
-		    rpm_rx_avail());
-	}
-	for (i = 0; i < 200 && !rpm_open; i++) {
-		rpm_poll();
-		wlan_wait(1);
+	/*
+	 * 0758 diagnostic: 0756/0757 reset the FIFOs, send VERSION+OPEN and
+	 * kick the RPM; the phone reboots ~15 s later and the console stops
+	 * right after the OPEN. Dump the raw ABL indices (no reset), write
+	 * VERSION with the kick suppressed, then VERSION with the kick, and
+	 * print a marker after each step so the reboot point tells us
+	 * whether the IPC kick is what kills the RPM.
+	 */
+	printf("SWEET RPM: raw tx %x %x rx %x %x\n",
+	    rpm_rd32(rpm_tx_off), rpm_rd32(rpm_tx_off + 4),
+	    rpm_rd32(rpm_rx_off), rpm_rd32(rpm_rx_off + 4));
+	rpm_kick = FALSE;
+	rpm_cmd(0, 0, 0);              /* VERSION, FIFO write only */
+	printf("SWEET RPM: ver no-kick tx %x\n", rpm_rd32(rpm_tx_off + 4));
+	wlan_wait(3000);
+	printf("SWEET RPM: alive 1\n");
+	rpm_kick = TRUE;
+	rpm_cmd(0, 0, 0);              /* VERSION with the IPC kick */
+	printf("SWEET RPM: kicked tx %x\n", rpm_rd32(rpm_tx_off + 4));
+	wlan_wait(3000);
+	printf("SWEET RPM: alive 2\n");
+	if (rpm_open) {
+		/* Not reached in 0758: the channel is never opened. */
+		for (i = 0; i < 200 && !rpm_open; i++) {
+			rpm_poll();
+			wlan_wait(1);
+		}
 	}
 	if (!rpm_open) {
-		printf("SWEET RPM: no OPEN_ACK (rx head %x tail %x avail %u)\n",
-		    rpm_rd32(rpm_rx_off + 4), rpm_rd32(rpm_rx_off),
-		    rpm_rx_avail());
+		printf("SWEET RPM: diag done\n");
 		return;
 	}
 	/*
