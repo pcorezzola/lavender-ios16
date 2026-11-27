@@ -47,7 +47,7 @@
  *                   peripheral 0xf0) read-only
  *   lavaud=9        also test the guarded SPMI write path on the PM660L DIG
  *                   spare register 0xf070 (write/read-back/restore)
- *   lavaud=10       also configure and start the AFE INT0_MI2S_RX port 0x102e
+ *   lavaud=10       also configure and start the AFE INT4_MI2S_RX port 0x1036
  *                   over APR (I2S 48 kHz/16-bit/SD0, then DEVICE_START)
  *   lavaud=11       also open an ADM playback device path (COPP) to 0x1036
  *   lavaud=12       also open the ASM stream, route it to the COPP, set the
@@ -322,9 +322,10 @@ struct smp2p_entry {
 #define AFE_PARAM_ID_I2S_CONFIG        0x0001020Du
 #define AFE_MODULE_CLOCK_SET           0x0001028Fu
 #define AFE_PARAM_ID_CLOCK_SET         0x00010290u
-#define AFE_CLK_INT4_MI2S_IBIT         0x0000010Fu /* primary MI2S (DT pri_mi2s) */
+#define AFE_CLK_INT4_MI2S_IBIT         0x00000113u
 #define AFE_CLK_INT_MCLK_1             0x00000306u
-#define AFE_PORT_INT4_MI2S_RX          0x102Eu /* primary MI2S (DT pri_mi2s) */
+#define AFE_CLK_SWR_NPL                0x00000307u
+#define AFE_PORT_INT4_MI2S_RX          0x1036u
 
 /* ADM, F6: the playback device path (COPP) to the AFE port. */
 #define APR_SVC_ASM                    7u
@@ -2516,7 +2517,7 @@ audio_glink_apr(void)
 }
 
 /*
- * F5: AFE INT0_MI2S_RX. SET_PARAM_V2 carries the I2S configuration (48 kHz,
+ * F5: AFE INT4_MI2S_RX. SET_PARAM_V2 carries the I2S configuration (48 kHz,
  * 16-bit, SD0, stereo, internal WS), then DEVICE_START starts the port.
  */
 static void
@@ -2544,7 +2545,7 @@ audio_afe_port(void)
 	if (audio_step < 10) {
 		return;
 	}
-	audio_announce("AFE INT0_MI2S_RX (0x102e) clock, I2S config and start");
+	audio_announce("AFE INT4_MI2S_RX (0x1036) clock, I2S config and start");
 
 	/* The MI2S bit clock: 48 kHz * 16 bits * 2 channels = 1.536 MHz. */
 	memset(&clk_pkt, 0, sizeof(clk_pkt));
@@ -2604,6 +2605,41 @@ audio_afe_port(void)
 	}
 	printf("SWEET AUDIO: AFE 0x1036 start sent (tx %u rx %u)\n",
 	    glink_tx_msgs, glink_rx_msgs);
+
+	/*
+	 * SoundWire codec clocks: the vendor msm_sdw driver enables these two
+	 * AFE clocks when the INT4 DAI starts.  SWR_NPL_CLK is the SoundWire
+	 * node-port-link clock (153.6 MHz) and INT_MCLK_1 the codec core MCLK
+	 * (9.6 MHz).  Without them the SWR master block is unclocked and an AP
+	 * read stalls.
+	 */
+	for (uint32_t ci = 0; ci < 2; ci++) {
+		uint32_t id = (ci == 0) ? AFE_CLK_SWR_NPL :
+		    AFE_CLK_INT_MCLK_1;
+		uint32_t hz = (ci == 0) ? 153600000u : 9600000u;
+
+		memset(&clk_pkt, 0, sizeof(clk_pkt));
+		clk_pkt.payload_size = 12 + sizeof(clk_pkt.clk);
+		clk_pkt.module = AFE_MODULE_CLOCK_SET;
+		clk_pkt.param = AFE_PARAM_ID_CLOCK_SET;
+		clk_pkt.size = sizeof(clk_pkt.clk);
+		clk_pkt.clk.version = 1;
+		clk_pkt.clk.id = id;
+		clk_pkt.clk.hz = hz;
+		clk_pkt.clk.attribute = 1;   /* COUPLE_NO */
+		clk_pkt.clk.root = 0;
+		clk_pkt.clk.enable = 1;
+		(void)glink_send_apr_pkt(APR_SVC_AFE, 1, 0,
+		    AFE_SVC_CMD_SET_PARAM, &clk_pkt, sizeof(clk_pkt),
+		    40 + ci);
+		for (ms = 0; ms < 500; ms += 10) {
+			while (glink_rx_one()) {
+			}
+			audio_wait(10);
+		}
+		printf("SWEET AUDIO: AFE SDW clock 0x%x at %u Hz sent\n",
+		    id, hz);
+	}
 }
 
 /*
