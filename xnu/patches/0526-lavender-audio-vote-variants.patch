@@ -1,0 +1,104 @@
+diff --git a/bsd/dev/lavender_audio.c b/bsd/dev/lavender_audio.c
+index a390d8a..bb6fe01 100644
+--- a/bsd/dev/lavender_audio.c
++++ b/bsd/dev/lavender_audio.c
+@@ -424,6 +424,7 @@ static uint32_t asm_map_handle, asm_map_status;
+ static volatile uint32_t asm_write_done;
+ static uint32_t afe_vote_handle;
+ static volatile uint32_t afe_vote_seen;
++static uint32_t afe_vote_status;
+ 
+ static inline uint32_t
+ audio_rd(vm_offset_t base, uint32_t off)
+@@ -2367,6 +2368,11 @@ glink_rx_one(void)
+ 						    asm_map_handle,
+ 						    asm_map_status);
+ 					}
++					if (a->opcode == 0x000110E8u &&
++					    audio_le32(p) == 0x000100F4u) {
++						afe_vote_status =
++						    audio_le32(p + 4);
++					}
+ 				}
+ 				if (a->opcode == 0x000100F5u &&
+ 				    len >= hdr_bytes + 4) {
+@@ -2925,7 +2931,8 @@ audio_pm660l_state(void)
+  * 0x100f5 with {u32 client_handle}.  Blocks: MACRO=3, DCODEC=4.
+  */
+ static int
+-audio_afe_vote(uint32_t block, const char *name, uint32_t token)
++audio_afe_vote(uint32_t block, const char *name, uint32_t token,
++    uint32_t src_port)
+ {
+ 	struct {
+ 		uint32_t block;
+@@ -2940,57 +2947,35 @@ audio_afe_vote(uint32_t block, const char *name, uint32_t token)
+ 	}
+ 	afe_vote_seen = 0;
+ 	afe_vote_handle = 0;
+-	(void)glink_send_apr_pkt(APR_SVC_AFE, 0, 0, 0x000100F4u, &vote,
+-	    sizeof(vote), token);
++	afe_vote_status = 0xffffffffu;
++	(void)glink_send_apr_pkt(APR_SVC_AFE, src_port, 0, 0x000100F4u,
++	    &vote, sizeof(vote), token);
+ 	for (ms = 0; ms < 1000 && !afe_vote_seen; ms += 10) {
+ 		while (glink_rx_one()) {
+ 		}
+ 		audio_wait(10);
+ 	}
+-	printf("SWEET AUDIO: AFE vote block %u handle %x (seen %u)\n",
+-	    block, afe_vote_handle, afe_vote_seen);
+-	return afe_vote_seen ? 0 : -1;
++	printf("SWEET AUDIO: AFE vote block %u src %u handle %x "
++	    "status %u seen %u\n", block, src_port, afe_vote_handle,
++	    afe_vote_status, afe_vote_seen);
++	return (afe_vote_seen || afe_vote_status == 0) ? 0 : -1;
+ }
+ 
+ /* Read-only: the LPASS SoundWire master registers (0x152c1000). */
+ static void
+ audio_swr_state(void)
+ {
+-	static const uint16_t regs[] = { 0x000, 0x004, 0x008, 0x00c, 0x010,
+-		0x020, 0x100, 0x104, 0x1044, 0x1048 };
+-
+ 	if (audio_step < 15) {
+ 		return;
+ 	}
+-	audio_announce("LPASS core HW votes and SoundWire master state");
++	audio_announce("LPASS core HW votes");
+ 	audio_wr(mclk, 0x18, 1);
+ 	printf("SWEET AUDIO: LPASS MCLK 0x15020018 -> %08x\n",
+ 	    audio_rd(mclk, 0x18));
+-	(void)audio_afe_vote(3, "LPASS_H", 30);   /* MACRO */
+-	(void)audio_afe_vote(4, "LPASS_D", 31);   /* DCODEC */
+-	audio_wait(5);
+-
+-	/* Vendor swrm_runtime_resume: soft reset, start the bus clock and
+-	 * enable the master.  These are writes to an unclocked block, so the
+-	 * read-back is the test. */
+-	audio_announce("SWR master soft reset");
+-	audio_wr(codec, 0x1000 + 0x008, 1);       /* SWRM_COMP_SW_RESET */
+-	audio_wait(1);
+-	audio_wr(codec, 0x1000 + 0x008, 1);
+-	audio_wait(1);
+-	audio_wr(codec, 0x1000 + 0x1044, 0x2);    /* MCP_BUS_CTRL clk start */
+-	audio_wait(1);
+-	audio_wr(codec, 0x1000 + 0x004, 0x1);     /* COMP_CFG enable */
+-	audio_wait(2);
+-	printf("SWEET AUDIO: SWR cfg %08x bus %08x\n",
+-	    audio_rd(codec, 0x1000 + 0x004), audio_rd(codec, 0x1000 + 0x1044));
+-	audio_wait(1);
+-
+-	for (uint32_t i = 0; i < sizeof(regs) / sizeof(regs[0]); i++) {
+-		printf("SWEET AUDIO: SWR[%04x] = %08x\n", regs[i],
+-		    audio_rd(codec, 0x1000 + regs[i]));
+-		audio_wait(10);
+-	}
++	(void)audio_afe_vote(3, "LPASS_H", 30, 1);   /* MACRO */
++	(void)audio_afe_vote(4, "LPASS_D", 31, 1);   /* DCODEC */
++	(void)audio_afe_vote(2, "LPASS_A", 32, 1);   /* AVTIMER */
++	audio_announce("SWR access skipped (the AP write stalls)");
+ }
+ /* F5 read-only: the LPASS digital codec registers that feed PDM_OUT_RX3. */
+ static void
