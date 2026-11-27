@@ -2,7 +2,7 @@
 
 A non-commercial research port of **XNU 8796** (Darwin 22 / iOS 16) and the **iPhone X (D22AP) iOS 16.7.16 userland** to the **Redmi Note 7** (`lavender`, Qualcomm SDM660 / Snapdragon 660).
 
-![iOS 16 home screen on the Redmi Note 7](docs/images/home-screen.png)
+![iOS 16 home screen on the Redmi Note 7](docs/images/home-screen.jpg)
 
 > **Status: boots to the iOS 16.7.16 lock screen and home screen in ~2–3 minutes.** This is an experimental bring-up, not a daily driver. The home screen renders icons, the dock and badges, Settings opens and the first-run Siri screen appears; touch (taps and swipes), physical buttons, USB networking (CDC-NCM: ping, SSH and a live kernel log from Windows) and fast eMMC reads (ADMA2) work on the device. The GPU, Wi-Fi, Bluetooth, audio, camera and a real battery gauge do not: rendering is done in software on the CPU. No Apple binaries are distributed in this repository.
 
@@ -12,8 +12,8 @@ The port is built on top of [`aLpHa-Git-69/ios-lavender`](https://github.com/aLp
 
 | Home screen | Settings | Siri setup |
 | --- | --- | --- |
-| <img src="docs/images/home-screen.png" width="230" alt="iOS 16 home screen on the Redmi Note 7"> | <img src="docs/images/settings.jpg" width="230" alt="Settings app on the Redmi Note 7"> | <img src="docs/images/siri-setup.jpg" width="230" alt="Siri setup screen on the Redmi Note 7"> |
-| SpringBoard's grid: app icons, dock, notification badge and the App Library pill. The two widget slots are still on `Esperando…`, waiting for their first timeline. | The whole Settings list renders and scrolls. | The first-run Siri screen appears. Without a microphone or speaker, Siri itself cannot work. |
+| <img src="docs/images/home-screen.jpg" width="230" alt="iOS 16 home screen on the Redmi Note 7"> | <img src="docs/images/settings.jpg" width="230" alt="Settings app on the Redmi Note 7"> | <img src="docs/images/siri-setup.jpg" width="230" alt="Siri setup screen on the Redmi Note 7"> |
+| SpringBoard's grid: app icons, dock, notification badge and the App Library pill. The default Bokeh wallpaper now renders, the dock and widgets are translucent, the Weather widget shows its loading placeholder and the Calendar widget is still a blank white tile. | The whole Settings list renders and scrolls. | The first-run Siri screen appears. Without a microphone or speaker, Siri itself cannot work. |
 
 <img src="docs/images/boot-self-tests.jpg" width="230" alt="Boot console with Skylight self-tests on the Redmi Note 7">
 
@@ -31,32 +31,33 @@ Under the Apple logo and progress bar, the userland **Skylight** window server r
 | Framebuffer / AppleCLCD | **Works** | 1080×2340, stride 4320, software composition via IOSurface |
 | `launchd` / daemons | **Works** | `launchd`, `backboardd`, `SpringBoard`, `securityd`, `keybagd`, `usermanagerd`, etc. |
 | iOS GUI | **Works** | Apple logo, progress bar and the iOS 16 lock screen |
-| Home screen | **Works** | SpringBoard grid with app icons, the dock, a notification badge and the App Library pill (`docs/images/home-screen.png`); the two widget slots stay on `Esperando…` (see the widgets row below) |
+| Home screen | **Works** | SpringBoard grid with app icons, the dock, a notification badge and the App Library pill (`docs/images/home-screen.jpg`); with the Bokeh wallpaper behind it; the Weather widget stays on its loading placeholder and the Calendar widget on a blank tile (see the widgets row below) |
 | Settings | **Works** | The whole Settings list renders and scrolls (`docs/images/settings.jpg`) |
 | Siri setup | **UI only** | The first-run Siri screen appears (`docs/images/siri-setup.jpg`); without a microphone or speaker Siri cannot answer |
 | Skylight self-tests | **Pass** | The boot console prints the window server's software blit self-tests as `PASSED` (`docs/images/boot-self-tests.jpg`) |
 | Code signing bring-up | **Works** | `cs_enforcement_disable=1`, `unentitled_ios_sim_launch=1`, `launchd_unsecure_cache=1` |
 | Persistent kernel log | **Works** | 4 MiB `SANTONILOG1` ring on the SYSTEM partition |
 | 4 Gold cores | **Works** | `cpus=4`; `SWEET CPU: requested=4 selected=4` |
-| Panel orientation | **Works** | The lock screen and the home screen are portrait and upright, filling the 1080×2340 panel (`docs/images/lock-screen.jpg`, `docs/images/home-screen.png`) |
+| Panel orientation | **Works** | The lock screen and the home screen are portrait and upright, filling the 1080×2340 panel (`docs/images/lock-screen.jpg`, `docs/images/home-screen.jpg`) |
 | Physical buttons | **Works** | Patch `0201`: Power/Volume Up/Volume Down through the SDM660 SPMI arbiter v3, delivered to iOS HID |
 | USB network | **Works** | Patches `0200`, `0210`–`0213`: DWC3 + QUSB2 bring-up, CDC-NCM (Windows UsbNcm, macOS, Linux), `ping 192.168.7.2`, live kernel log on UDP 5140 (`sweetusb=2`; `tools/usbnet-windows.ps1`). Root SSH over the link (dropbear, `docs/SSH.md`) |
 | Touch | **Works** | Novatek NT36672A on QUP1 I2C (bit-banged): patches `0193`–`0208`, `0230`, `0231`, `0234`. Taps, icons and the swipe-up unlock work; ~249 frames per 10 s with 0 I2C errors (~14 ms per read). `0234` makes SweetHID use the real 1080×2340 panel (it assumed 2400, which shifted touches and hid the bottom edge). Kernel must be built by the CI (Xcode 15): a local Xcode 16.2 build read garbage firmware info and left touch disabled |
 | eMMC reads by ADMA2 | **Works** | Patches `0232`, `0233`: the SDCC v5 core has no SDMA, only ADMA2. Cold reads ~465 KB/s → ~16 MB/s, boot to the lock screen ~23 min → ~2–3 min. Writes stay PIO |
-| Wallpaper: Color | **Works (preview)** | The wallpaper gallery opens and shows a preview for Color (see Wallpapers below) |
+| Wallpaper | **Works** | The selected wallpaper (Bokeh) is drawn behind the home screen (`docs/images/home-screen.jpg`); the gallery opens, but most previews are still blank white (see Wallpapers below) |
 
 ## What does not work yet
 
 | Area | Status | Notes |
 | --- | --- | --- |
-| GPU acceleration | **Missing** | Adreno 512 has no driver and there is no Metal device (`MTLCreateSystemDefaultDevice()` returns nil). An empty `IOAcceleratorES` keeps QuartzCore from waiting; everything is drawn by CoreAnimation's software renderer (`CA::OGL::SW`), see Performance |
+| GPU acceleration | **Works (not optimised)** | Own Adreno 512 kernel driver plus a Metal device plug-in ([lavender-metal](https://github.com/pcorezzola/lavender-metal)); `backboardd` draws the lock screen, Control Centre and wallpaper on the GPU. Animations and transitions are still slow (the CPU copy into the scanout IOSurface and shader compiles dominate; the GPU cannot touch memory above 4 GB). After a reboot the plug-in must be switched on (`lavmetal_switch on`) |
 | Camera | **Missing** | Camera button and camera stack are not implemented |
-| Wi-Fi | **Missing** | No Wi-Fi driver or firmware for the WCN3990 radio; the network is USB only |
+| Wi-Fi / internet | **Missing** | No Wi-Fi driver or firmware for the WCN3990 radio, so no internet; the only network is USB |
 | Bluetooth | **Missing** | No Bluetooth transport; `bluetoothd` respawns in a loop without hardware |
 | Audio | **Data path verified, no sound** | ADSP/GLINK/APR, AFE, ADM, ASM and the 16 KiB tone work (12 × `WRITE_DONE`); the missing link is the LPASS digital codec/SoundWire master that feeds the PM660L's SWR DAC port. AP reads of `0x152c0000`/`0x152c1000` stall once the DSP audio is up. See [Audio](#audio). |
-| Wallpapers (most) | **Partial** | Only simple wallpapers (Color) render a preview; ones that need Metal such as Astronomy are very slow or fail. See Wallpapers |
+| Brightness | **Missing** | No backlight control: the brightness slider does nothing |
+| Wallpaper gallery previews | **Partial** | The gallery opens and the wallpaper itself shows, but the previews are blank white (a real iPhone shows the picture, `docs/images/wallpaper-editor.jpg`); Astronomy (Metal) aborts on launch. See Wallpapers |
 | Battery / charging UI | **Partial** | Static battery fallback (`100%`, 4200 mV); no gauge driver |
-| Home screen widgets | **Missing** | Both slots keep the `Esperando…` placeholder: the WidgetKit extension never hands over a first timeline. Not investigated yet; it sits in the same extension-hosting area as the wallpaper providers |
+| Home screen widgets | **Partial** | The slots now draw: Weather shows a loading placeholder and Calendar a blank white tile. The Calendar widget extension spends minutes of CPU in SwiftUI layout on the slow cores and hands over no content yet |
 | Screen colours | **To verify** | The date, clock and status bar render red/orange on the lock screen and home screen: wallpaper tint or a framebuffer colour-format issue, not checked yet |
 | RTC / date | **Partial** | Patch `0220` reads the PM660 RTC. Its raw count is not Unix time (Android keeps its own offset), so each phone needs `sweetrtcoff=` measured once in TWRP (`docs/BOOT.md`); the home-screen clock still reads `mié 4 feb 05:28` instead of the real date, so this unit's offset is still to be set |
 | `preboot` / data volume | **Partial** | `libignition` cannot find the preboot volume; the boot continues unsealed |
@@ -92,6 +93,14 @@ Opening *Settings → Wallpaper → Add New Wallpaper* used to show a blank gall
 - PosterBoard then aborted in `-[PBFHomeScreenPreviewImageBuilder _imageForView:]`: it renders the preview with Metal (`MTLCreateSystemDefaultDevice()` → `newCommandQueue`) and put a nil queue into an `NSDictionary`. A small replacement for that method (`tools/posterboard-preview.m`) avoids the crash.
 - Result: the gallery opens and **Color shows a preview**. Applying it to the home and lock screens is still to be verified.
 - **Astronomy** and other wallpapers that link Metal still fail: `AegirPoster` and `CollectionsPoster` are terminated with `extension check-in timeout` and the system gets very slow. This needs a Metal device, so it is the same limit as the GPU.
+
+**Status on 2026-11-27.** Working: USB (network, SSH, live log), touch and graphics (GPU rendering, not optimised yet). Not working: audio, internet (Wi-Fi), brightness control, camera and Bluetooth.
+
+**2026-11-27 — wallpapers working.** After repairing the root filesystem (the poster data store had unreadable files) and bringing `AegirPoster` back, the poster gallery opens and the home screen draws the wallpaper. The first photo is the home screen, the second *Settings → General → About* (iPhone X, iOS 16.7.16), the third the wallpaper editor next to a real iPhone: here the previews are still blank white.
+
+| Home screen | About | Wallpaper editor (left: this port, right: a real iPhone) |
+| --- | --- | --- |
+| <img src="docs/images/home-screen.jpg" width="230" alt="Home screen with the Bokeh wallpaper"> | <img src="docs/images/settings-about.jpg" width="230" alt="Settings, General, About"> | <img src="docs/images/wallpaper-editor.jpg" width="300" alt="Wallpaper editor on the port and on a real iPhone"> |
 
 ## Milestones
 
@@ -238,7 +247,7 @@ read-only state probes; `lavaud=13` = data path without the PM660L PA).
 | Display | 1080×2340, stride 4320, framebuffer `0x9d400000` |
 | Touch | Novatek NT36672 (QUP1 I2C, `0x62`); Synaptics is the alternative panel |
 | PMIC | PM660 / PM660L |
-| GPU | Adreno 512 (no iOS driver) |
+| GPU | Adreno 512 (own kernel driver + Metal plug-in, not optimised) |
 | Bootloader | Unlocked Xiaomi ABL; `fastboot boot` is stubbed on this unit |
 
 See [`docs/HARDWARE.md`](docs/HARDWARE.md) for the full audit and constraints.
