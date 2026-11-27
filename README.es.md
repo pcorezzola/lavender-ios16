@@ -145,8 +145,10 @@ AP-only.
 ### Qué falta
 
 - El **digital codec/SWR master** del LPASS no está clockeado/configurado para el AP: leer
-  `0x152c0000`/`0x152c1000` con el DSP arriba cuelga (`0519`, `0522`). El vendor necesita el
-  **voto de clock LPASS** (`lpass_core_hw_vote`, QMI sobre GLINK).
+  `0x152c0000`/`0x152c1000` con el DSP arriba cuelga (`0519`, `0522`). El voto AFE
+  `0x100f4` solo acepta **AVTIMER (2)**; MACRO (3) y DCODEC (4) devuelven
+  `ADSP_EUNSUPPORTED` (`0526`). Los clocks NPL (`0x307`) e INT_MCLK_1 (`0x306`) se aceptan
+  (`0525`), pero el write al master SWR igual se traba.
 - La ruta `INT4_MI2S_RX -> RX4/COMP1 -> SpkrLeft SWR DAC_Port` no se habilita, así que el DAC
   del PM660L no recibe datos; el PA encendido solo amplifica silencio.
 - `VDD_SPK/BOB` y los reguladores del PM660L son de RPM; este port no tiene ese driver.
@@ -162,11 +164,14 @@ AP-only.
 - 16 KiB por write; 64 KiB cuelga; repetir solo al recibir `0x10D99`.
 - El clock set `0x306` del AFE no genera MCLK; el real es `0x15020018 = 1`.
 - El parlante es **INT4**, mono; INT0 es auricular.
+- El voto AFE `0x100f4` solo sirve para **AVTIMER (2)**: con bloques 2/3/4, solo el 2
+  devuelve handle; MACRO (3) y DCODEC (4) dan `ADSP_EUNSUPPORTED`. No reintentarlos.
 - No leer `0x152c0000`/`0x152c1000` con el DSP arriba.
 
 ### Próximo
 
-1. Voto de clock LPASS (`lpass_core_hw_vote`).
+1. Topology AFE (`AFE_CMD_ADD_TOPOLOGIES`, ACDB 15) o el clock controller del LPASS: el
+   voto AFE no puede encender MACRO/DCODEC.
 2. Init del master SWR (`swr-mstr-ctrl.c`) en `0x152c1000`.
 3. Ruta `SWR DAC_Port` del PM660L + PA/BOB.
 4. `/dev/lavender-audio` + HAL y luego mic/auricular.

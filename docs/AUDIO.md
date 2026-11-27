@@ -40,8 +40,10 @@ reads 1 (`0520`) and the PM660L clock block + speaker PA writes return 0.
 
 The missing link is the **LPASS digital codec / SoundWire master** that feeds the PM660L's
 **SWR DAC port**: reading `0x152c0000` or `0x152c1000` after the DSP audio is up stalls the
-kernel (`0519`, `0522`), and the vendor `swr-mstr-ctrl` driver needs the **LPASS core HW vote**
-(QMI over GLINK) before the block is accessible. The **WSA881x amplifiers are not fitted**
+kernel (`0519`, `0522`). The AFE LPASS vote (`0x100f4`) only supports **AVTIMER (2)**; MACRO
+(3) and DCODEC (4) return `ADSP_EUNSUPPORTED` (`0526`). The AFE NPL (`0x307`, 153.6 MHz) and
+INT_MCLK_1 (`0x306`, 9.6 MHz) clocks are accepted (`0525`), but the SWR master APB write still
+stalls. The **WSA881x amplifiers are not fitted**
 (`qcom,wsa-disable`), so the speaker path is the PM660L's internal SWR DAC port, not an
 external amp. The headset path uses the same LPASS/SWR block.
 
@@ -104,7 +106,11 @@ userland AudioServer plug-in in `/System/Library/Audio/Plug-Ins/HAL` presenting
 | `0520` | LPASS MCLK `0x15020018 = 1` | device-verified |
 | `0521` | primary MI2S `INT0 0x102e` experiment | device-verified, no sound (the speaker is INT4) |
 | `0522` | read-only SWR master state | **stalls at the read**; the DSP owns the block |
-| `0523`+ | LPASS core/audio HW vote, SWR master init, PM660L SWR DAC port, `/dev` + HAL | next |
+| `0523` | AFE remote LPASS vote (`0x100f4`) | status 3 (`unsupported`) for MACRO/DCODEC |
+| `0524` | SWR master soft reset | **stalls the audio thread** |
+| `0525` | SWR NPL (`0x307`) + INT_MCLK_1 (`0x306`) AFE clocks | clocks accepted; SWR write still stalls |
+| `0526` | vote variants (blocks 2/3/4, src 1) | only **AVTIMER (2)** returns a handle |
+| `0527`+ | AFE topology (`ADD_TOPOLOGIES`, ACDB 15) or the LPASS clock controller; then SWR master init and the PM660L SWR DAC port | next |
 
 ## Running the probe
 

@@ -157,9 +157,12 @@ same LPASS digital codec/SWR, so there is no AP-only shortcut for the headset ei
 - **The LPASS digital codec/SWR master is not clocked/configured for the AP.** Reading
   `0x152c0000` or `0x152c1000` after the audio subsystem is up stalls the kernel (`0519`,
   `0522`); the read-only probe at ~51 s, before the audio boot, returned zeros safely.
-  The vendor `swr-mstr-ctrl` driver requires the **LPASS core HW vote** (a QMI service
-  over GLINK) and the LPASS audio clock; without that vote the SWR master block is
-  unclocked.
+  The vendor `swr-mstr-ctrl` driver requests the **LPASS core/audio HW vote** before
+  touching the block. `0526` shows the AFE vote opcode is implemented for **AVTIMER (2)**
+  only: MACRO (3) and DCODEC (4) return `ADSP_EUNSUPPORTED`, so this port cannot enable
+  those clocks through that command. The AFE NPL (`0x307`, 153.6 MHz) and INT_MCLK_1
+  (`0x306`, 9.6 MHz) clocks are accepted (`0525`), but the SWR master APB write still
+  stalls.
 - **The PM660L SWR DAC port is never fed.** The AFE `INT4_MI2S_RX` starts and the tone is
   consumed by the ADSP, but the LPASS digital codec does not route that MI2S to the SWR
   master, so the PM660L DAC sees no data. The PM660L analog PA/boost being on only makes
@@ -189,6 +192,10 @@ same LPASS digital codec/SWR, so there is no AP-only shortcut for the headset ei
 | `0520` | LPASS MCLK `0x15020018 = 1` | device-verified |
 | `0521` | primary MI2S `INT0 0x102e` experiment | device-verified, no sound (the speaker is INT4) |
 | `0522` | read-only SWR master state | **stalls at the read**; the block is not AP-accessible while the DSP owns it |
+| `0523` | AFE remote LPASS vote (`0x100f4`) | status 3 (`unsupported`) for MACRO/DCODEC |
+| `0524` | SWR master soft reset | **stalls the audio thread** |
+| `0525` | SWR NPL (`0x307`) + INT_MCLK_1 (`0x306`) AFE clocks | clocks accepted; SWR write still stalls |
+| `0526` | vote variants (blocks 2/3/4, src 1) | only **AVTIMER (2)** returns a handle |
 
 ### Traps and lessons
 
@@ -219,12 +226,17 @@ same LPASS digital codec/SWR, so there is no AP-only shortcut for the headset ei
 - **The LPASS SWR/digital-codec block is not AP-accessible once the DSP audio is up.**
   Read-only probes at boot (before the audio firmware runs) return zeros; after the ADSP
   is running, the same reads stall. Do not add another read-only probe of `0x152c0000` or
-  `0x152c1000` without first implementing the LPASS core HW vote.
+  `0x152c1000` without first solving the block's clock/power.
+- **The AFE LPASS vote only supports AVTIMER.** `0x100f4` with block 2 returns a handle;
+  blocks 3 (MACRO) and 4 (DCODEC) return `ADSP_EUNSUPPORTED` (3). Do not retry those two.
+  The SWR NPL/MCLK clocks (`0x307`/`0x306`) are accepted but do not make the SWR master
+  APB accessible: its write still stalls.
 
 ### Next milestones
 
-1. **LPASS core/audio HW vote** over GLINK/QMI (`lpass_core_hw_vote`) — clocks the SWR
-   master and digital codec.
+1. **DSP topology or LPASS clock controller.** The AFE vote can only enable AVTIMER, so
+   the SWR master must be brought up by the AFE topology (`AFE_CMD_ADD_TOPOLOGIES`, ACDB
+   id 15) or by the LPASS clock controller before any AP register access.
 2. **SWR master init** (`swr-mstr-ctrl.c` sequence: reset, frame row/col, clock divider,
    bus control) at `0x152c1000`.
 3. **PM660L SWR DAC port** route (`SpkrLeft SWR DAC_Port`, RX4/COMP1) and speaker
