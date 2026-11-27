@@ -3234,7 +3234,8 @@ rpm_rx_advance(uint32_t n)
 {
 	uint32_t t = rpm_rd32(rpm_rx_off) + n;
 
-	if (t >= rpm_rx_len) {
+	/* A garbage length must never leave the tail past the ring. */
+	while (t >= rpm_rx_len) {
 		t -= rpm_rx_len;
 	}
 	rpm_wr32(rpm_rx_off, t);
@@ -3245,7 +3246,8 @@ rpm_poll(void)
 {
 	uint8_t h[16];
 
-	while (rpm_rx_avail() >= 8) {
+	/* Bounded: a malformed FIFO must not spin the WLAN thread forever. */
+	for (unsigned parsed = 0; parsed < 16 && rpm_rx_avail() >= 8; parsed++) {
 		uint16_t cmd;
 		uint32_t p1, p2;
 
@@ -3265,6 +3267,12 @@ rpm_poll(void)
 			rpm_rx_peek(h, 0, 16);
 			chunk = (uint32_t)h[8] | ((uint32_t)h[9] << 8) |
 			    ((uint32_t)h[10] << 16) | ((uint32_t)h[11] << 24);
+			if (chunk > rpm_rx_len) {
+				printf("SWEET RPM: bad chunk %u, drop fifo\n",
+				    chunk);
+				rpm_rx_advance(rpm_rx_avail());
+				break;
+			}
 			left = (uint32_t)h[12] | ((uint32_t)h[13] << 8) |
 			    ((uint32_t)h[14] << 16) | ((uint32_t)h[15] << 24);
 			n = (16 + chunk + 7) & ~7u;
@@ -3410,13 +3418,18 @@ wlan_rails_on(void)
 		memcpy(open + 8, RPM_CHAN, name_len);
 		printf("SWEET RPM: open %s (%u bytes)\n", RPM_CHAN, olen);
 		(void)rpm_tx(open, olen, NULL, 0);
+		printf("SWEET RPM: rx head %x tail %x avail %u\n",
+		    rpm_rd32(rpm_rx_off + 4), rpm_rd32(rpm_rx_off),
+		    rpm_rx_avail());
 	}
 	for (i = 0; i < 200 && !rpm_open; i++) {
 		rpm_poll();
 		wlan_wait(1);
 	}
 	if (!rpm_open) {
-		printf("SWEET RPM: no OPEN_ACK\n");
+		printf("SWEET RPM: no OPEN_ACK (rx head %x tail %x avail %u)\n",
+		    rpm_rd32(rpm_rx_off + 4), rpm_rd32(rpm_rx_off),
+		    rpm_rx_avail());
 		return;
 	}
 	/*
