@@ -1,0 +1,86 @@
+diff --git a/bsd/dev/lavender_wlan.c b/bsd/dev/lavender_wlan.c
+index 1adbba7..a1a42b2 100644
+--- a/bsd/dev/lavender_wlan.c
++++ b/bsd/dev/lavender_wlan.c
+@@ -3401,35 +3401,57 @@ wlan_rails_on(void)
+ 		return;
+ 	}
+ 	/*
+-	 * 0758 diagnostic: 0756/0757 reset the FIFOs, send VERSION+OPEN and
+-	 * kick the RPM; the phone reboots ~15 s later and the console stops
+-	 * right after the OPEN. Dump the raw ABL indices (no reset), write
+-	 * VERSION with the kick suppressed, then VERSION with the kick, and
+-	 * print a marker after each step so the reboot point tells us
+-	 * whether the IPC kick is what kills the RPM.
++	 * 0759: GLINK handshake in the correct order. 0758 proved the ABL
++	 * indices are 0 and the IPC kick alone is harmless, so the reboot of
++	 * 0756/0757 came from issuing OPEN before the version exchange was
++	 * complete (the RPM answers VERSION and expects our VERSION_ACK
++	 * before it accepts a channel open).  Send VERSION, read the RX
++	 * descriptor once (first read after the kick), wait for the RPM's
++	 * VERSION/ACK, then open the channel and wait for OPEN_ACK.
+ 	 */
+-	printf("SWEET RPM: raw tx %x %x rx %x %x\n",
+-	    rpm_rd32(rpm_tx_off), rpm_rd32(rpm_tx_off + 4),
+-	    rpm_rd32(rpm_rx_off), rpm_rd32(rpm_rx_off + 4));
+-	rpm_kick = FALSE;
+-	rpm_cmd(0, 0, 0);              /* VERSION, FIFO write only */
+-	printf("SWEET RPM: ver no-kick tx %x\n", rpm_rd32(rpm_tx_off + 4));
+-	wlan_wait(3000);
+-	printf("SWEET RPM: alive 1\n");
+-	rpm_kick = TRUE;
++	printf("SWEET RPM: send version\n");
+ 	rpm_cmd(0, 0, 0);              /* VERSION with the IPC kick */
+-	printf("SWEET RPM: kicked tx %x\n", rpm_rd32(rpm_tx_off + 4));
+-	wlan_wait(3000);
+-	printf("SWEET RPM: alive 2\n");
+-	if (rpm_open) {
+-		/* Not reached in 0758: the channel is never opened. */
+-		for (i = 0; i < 200 && !rpm_open; i++) {
+-			rpm_poll();
+-			wlan_wait(1);
++	printf("SWEET RPM: version sent, rx %x %x\n",
++	    rpm_rd32(rpm_rx_off), rpm_rd32(rpm_rx_off + 4));
++	for (i = 0; i < 200 && !rpm_ver; i++) {
++		rpm_poll();
++		if ((i % 40) == 0) {
++			printf("SWEET RPM: ver wait %u avail %u\n", i,
++			    rpm_rx_avail());
++		}
++		wlan_wait(1);
++	}
++	printf("SWEET RPM: ver done ver %u open %u avail %u\n", rpm_ver,
++	    rpm_open, rpm_rx_avail());
++	if (!rpm_ver) {
++		printf("SWEET RPM: no VERSION from the RPM\n");
++		return;
++	}
++	{
++		uint8_t open[32];
++		uint32_t name_len = sizeof(RPM_CHAN);
++		uint32_t olen = (8 + name_len + 7) & ~7u;
++
++		memset(open, 0, sizeof(open));
++		open[0] = 2;           /* CMD_OPEN */
++		open[2] = (uint8_t)RPM_LCID;
++		open[4] = (uint8_t)name_len;
++		memcpy(open + 8, RPM_CHAN, name_len);
++		printf("SWEET RPM: open %s (%u bytes)\n", RPM_CHAN, olen);
++		(void)rpm_tx(open, olen, NULL, 0);
++	}
++	for (i = 0; i < 300 && !rpm_open; i++) {
++		rpm_poll();
++		if ((i % 50) == 0) {
++			printf("SWEET RPM: open wait %u avail %u\n", i,
++			    rpm_rx_avail());
+ 		}
++		wlan_wait(1);
+ 	}
+ 	if (!rpm_open) {
+-		printf("SWEET RPM: diag done\n");
++		printf("SWEET RPM: no OPEN_ACK (rx head %x tail %x avail %u)\n",
++		    rpm_rd32(rpm_rx_off + 4), rpm_rd32(rpm_rx_off),
++		    rpm_rx_avail());
+ 		return;
+ 	}
+ 	/*
