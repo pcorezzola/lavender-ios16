@@ -24,6 +24,9 @@
  *                   this at lvcam=3). 1011 prints one line before every
  *                   access and gives the flusher 300 ms, so the last line
  *                   of a frozen boot names the access that wedged it.
+ *   lvcam=6         F2b: VFE48 testgen (64x48) into one frame-based WM0 with
+ *                   a contiguous kernel buffer, poll the WM0 frame-done IRQ
+ *                   and report the first words of the frame.
  *   lvcam=5         F2a: power the VFE0/CSID0/CSI0 clock tree (VFE0 GDSC,
  *                   vfe0/csi0 RCGs at 120/200 MHz, AHB/core/pix/rdi
  *                   branches), read the VFE48 and CSID v3.5 hardware
@@ -98,8 +101,14 @@
 #include <libkern/libkern.h>
 #include <machine/machine_routines.h>
 #include <pexpert/pexpert.h>
+#include <vm/pmap.h>
+#include <vm/vm_kern.h>
+#include <vm/memory_types.h>
 
 extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+extern vm_map_t kernel_map;
+extern pmap_t kernel_pmap;
+extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
 
 #define CAM_NITEMS(a)   (sizeof(a) / sizeof((a)[0]))
 
@@ -1538,6 +1547,147 @@ cam_f2a(void)
 }
 
 /*
+ * 1018, F2b: VFE48 TESTGEN -> WM0 -> DRAM. The stock driver's own test
+ * generator feeds the CAMIF/PIX path, so no CSID or sensor is needed to
+ * prove VFE -> memory: reset (0x18 = 0x3F7), clear the IRQs, program the
+ * testgen (64x48, 8 bpp), one frame-based WM0 with a contiguous buffer in
+ * both ping-pong slots, enable the WM (0xCEC), latch the config (0x4AC) and
+ * wait for the WM0 frame-done bit (irq0 bit 8, status 0x6C).
+ */
+#define CAM_VFE_TC_LINES        48u
+#define CAM_VFE_TC_PIXELS       64u
+#define CAM_VFE_TC_SIZE         0x2000u
+
+static void
+cam_f2b(void)
+{
+	vm_offset_t va = 0;
+	uint64_t pa = 0;
+	ppnum_t pn;
+	uint32_t v, s0 = 0, s1 = 0;
+	unsigned i, nz = 0;
+
+	printf("SWEET CAM: F2b: VFE48 testgen -> WM0 -> DRAM\n");
+	if (cam_domain_power_up() != 0) {
+		printf("SWEET CAM: F2b: camss_top did not come up\n");
+		return;
+	}
+	cam_ahb_power_up();
+	v = cam_rd(mmcc, CAM_MMCC_CAMSS_VFE0_GDSCR);
+	if ((v & CAM_GDSC_SW_COLLAPSE) != 0 || (v & CAM_GDSC_PWR_ON) == 0) {
+		cam_wr(mmcc, CAM_MMCC_CAMSS_VFE0_GDSCR,
+		    v & ~CAM_GDSC_SW_COLLAPSE);
+		(void)cam_poll(mmcc, CAM_MMCC_CAMSS_VFE0_GDSCR,
+		    CAM_GDSC_PWR_ON, CAM_GDSC_PWR_ON, 20);
+	}
+	cam_rcg_on(CAM_MMCC_VFE0_CLK_SRC, CAM_CFG_VFE0_120MHZ);
+	cam_rcg_on(CAM_MMCC_CSI0_CLK_SRC, CAM_CFG_CSI0_200MHZ);
+	(void)cam_branch_on(0x3668u);
+	(void)cam_branch_on(0x36a8u);
+	(void)cam_branch_on(0x3720u);
+	(void)cam_branch_on(0x3704u);
+	(void)cam_branch_on(0x30bcu);
+	(void)cam_branch_on(0x30b4u);
+	(void)cam_branch_on(0x30e4u);
+	(void)cam_branch_on(0x30d4u);
+
+	if (camss == 0) {
+		camss = ml_io_map(CAM_CAMSS_PA, CAM_CAMSS_SIZE);
+	}
+	if (camss == 0) {
+		printf("SWEET CAM: F2b: CAMSS map failed\n");
+		return;
+	}
+	if (kmem_alloc_contig(kernel_map, &va, CAM_VFE_TC_SIZE, PAGE_MASK, 0, 0,
+	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) !=
+	    KERN_SUCCESS) {
+		printf("SWEET CAM: F2b: contiguous buffer failed\n");
+		return;
+	}
+	pn = pmap_find_phys(kernel_pmap, (addr64_t)va);
+	if (pn == 0) {
+		printf("SWEET CAM: F2b: no phys for the buffer\n");
+		return;
+	}
+	pa = ptoa_64(pn);
+	printf("SWEET CAM: F2b: buffer va %#lx pa %#llx size %u\n",
+	    (unsigned long)va, (unsigned long long)pa, CAM_VFE_TC_SIZE);
+
+	cam_wr(camss, 0x18u, 0x3F7u);
+	cam_wait(10);
+	cam_wr(camss, 0x64u, 0xFFFFFFFFu);
+	cam_wr(camss, 0x68u, 0xFFFFFFFFu);
+	cam_wr(camss, 0x58u, 1u);
+	cam_wr(camss, 0x84u, 0x101u);
+
+	v = cam_rd(camss, 0x3Cu);
+	cam_wr(camss, 0x3Cu, v | (1u << 31));
+	cam_wr(camss, 0x50u, (1u << 5) | (1u << 22) | (0x20u << 8));
+	cam_wr(camss, 0xC5Cu, 0x0u);
+	v = ((CAM_VFE_TC_LINES - 1u) << 16) | (CAM_VFE_TC_PIXELS - 1u);
+	cam_wr(camss, 0xC60u, v);
+	cam_wr(camss, 0x484u, v);
+	cam_wr(camss, 0x488u, CAM_VFE_TC_PIXELS - 1u);
+	cam_wr(camss, 0x48Cu, CAM_VFE_TC_LINES - 1u);
+	cam_wr(camss, 0x490u, 0x0u);
+	cam_wr(camss, 0x494u, 0x0u);
+	cam_wr(camss, 0x498u, 0xFFFFFFFFu);
+	cam_wr(camss, 0x49Cu, 0xFFFFFFFFu);
+	cam_wr(camss, 0x4A0u, 0x140000u | (CAM_VFE_TC_LINES - 50u));
+
+	cam_wr(camss, 0xA0u + 0x04u, (uint32_t)pa);
+	cam_wr(camss, 0xA0u + 0x08u, (uint32_t)(pa + CAM_VFE_TC_SIZE));
+	cam_wr(camss, 0xA0u + 0x0Cu, (uint32_t)pa);
+	cam_wr(camss, 0xA0u + 0x10u, (uint32_t)(pa + CAM_VFE_TC_SIZE));
+	cam_wr(camss, 0xA0u + 0x14u, 0x2u);
+	cam_wr(camss, 0xA0u + 0x1Cu,
+	    ((((CAM_VFE_TC_PIXELS + 3u) / 4u) - 1u) << 16) |
+	    (CAM_VFE_TC_LINES - 1u));
+	cam_wr(camss, 0xA0u + 0x20u, 3u | ((CAM_VFE_TC_LINES - 1u) << 2) |
+	    (((CAM_VFE_TC_PIXELS + 1u) / 2u) << 16));
+	cam_wr(camss, 0xA0u + 0x28u, 0xFFFFFFFFu);
+	cam_wr(camss, 0x90u, 0x300u);
+	v = cam_rd(camss, 0xCECu);
+	cam_wr(camss, 0xCECu, v | 0x2u);
+	cam_wr(camss, 0x4ACu, 0x1u);
+
+	for (i = 0; i < 500; i++) {
+		s0 = cam_rd(camss, 0x6Cu);
+		s1 = cam_rd(camss, 0x70u);
+		if (s0 & 0x100u) {
+			break;
+		}
+		cam_wait(1);
+	}
+	printf("SWEET CAM: F2b: irq0 %08x irq1 %08x after %u ms\n", s0, s1, i);
+	for (i = 0; i < CAM_VFE_TC_SIZE; i += 4u) {
+		if (*(volatile uint32_t *)(va + i) != 0) {
+			nz++;
+		}
+	}
+	printf("SWEET CAM: F2b: non-zero words %u/%u, first %08x %08x %08x "
+	    "%08x\n", nz, CAM_VFE_TC_SIZE / 4u,
+	    *(volatile uint32_t *)(va), *(volatile uint32_t *)(va + 4),
+	    *(volatile uint32_t *)(va + 8), *(volatile uint32_t *)(va + 12));
+
+	v = cam_rd(camss, 0xCECu);
+	cam_wr(camss, 0xCECu, v & ~0x2u);
+	cam_branch_off(0x30d4u);
+	cam_branch_off(0x30e4u);
+	cam_branch_off(0x30b4u);
+	cam_branch_off(0x30bcu);
+	cam_branch_off(0x3704u);
+	cam_branch_off(0x3720u);
+	cam_branch_off(0x36a8u);
+	cam_branch_off(0x3668u);
+	v = cam_rd(mmcc, CAM_MMCC_CAMSS_VFE0_GDSCR);
+	cam_wr(mmcc, CAM_MMCC_CAMSS_VFE0_GDSCR, v | CAM_GDSC_SW_COLLAPSE);
+	cam_ahb_power_down();
+	cam_domain_power_down();
+	printf("SWEET CAM: F2b done\n");
+}
+
+/*
  * 1012: read the SPMI arbiter version from a helper thread at a chosen
  * moment, before the probe touches anything. A stalled read loses only this
  * thread; the rest of the system (and the main camera thread) keeps running.
@@ -1651,6 +1801,9 @@ lavender_cam_thread(__unused void *arg, __unused wait_result_t wr)
 
 	if (cam_step >= 5) {
 		cam_f2a();
+	}
+	if (cam_step >= 6) {
+		cam_f2b();
 	}
 
 	smmu_mmss = ml_io_map(CAM_SMMU_PA, CAM_SMMU_SIZE);
