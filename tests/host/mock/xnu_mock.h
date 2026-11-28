@@ -41,6 +41,7 @@ typedef unsigned int boolean_t;
 #define MIN(a, b)               ((a) < (b) ? (a) : (b))
 #endif
 #define PAGE_MASK               0x3fffu
+#define PAGE_SHIFT              14
 #define ptoa_64(x)              ((uint64_t)(x) << 14)
 #define KMA_DATA                1
 #define KMA_ZERO                2
