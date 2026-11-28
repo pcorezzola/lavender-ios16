@@ -3371,6 +3371,7 @@ static void
 wlan_rails_on(void)
 {
 	uint32_t magic, count, i;
+	vm_offset_t gicd;
 
 	if (rpm_rails_done) {
 		return;
@@ -3419,23 +3420,72 @@ wlan_rails_on(void)
 		return;
 	}
 	/*
-	 * 0763: split the handshake. Phase 1 (no OPEN): VERSION v1, ACK v1
-	 * and the rail/clock votes, printing the TX read index (owned by the
-	 * RPM) to see whether it consumed our messages, and reading R2AP
-	 * only when the GIC latch for SPI 168 is pending. 0762 died within
-	 * 200 ms of the OPEN write while VERSION and ACK had survived, so
-	 * phase 2 then sends the OPEN with a marker right after the write.
+	 * 0765: the real GLINK handshake, gated by the RPM interrupt. 0762
+	 * proved the kick and post-kick writes are safe; 0764 showed the RPM
+	 * consumed our VERSION (tx read == head == 8) but died when we
+	 * blindly VERSION_ACKed a version it may not have negotiated. Read
+	 * R2AP only when the GIC has the RPM edge (SPI 168) pending: the RPM
+	 * just wrote something, so the AOSS SRAM is awake. rpm_poll() then
+	 * answers the RPM VERSION with the matching ACK, and OPEN_ACK is
+	 * waited for the same way.
 	 */
-	printf("SWEET RPM: phase1 version\n");
+	gicd = ml_io_map(GICD_PA, GICD_SIZE);
+	if (gicd == 0) {
+		printf("SWEET RPM: GICD map failed\n");
+		return;
+	}
+	printf("SWEET RPM: v1 version\n");
 	rpm_cmd(0, 1, 0);              /* VERSION v1 + IPC kick */
-	wlan_wait(100);
-	printf("SWEET RPM: phase1 ver tx %x %x\n",
-	    rpm_rd32(rpm_tx_off), rpm_rd32(rpm_tx_off + 4));
-	printf("SWEET RPM: phase1 ack\n");
-	rpm_cmd(1, 1, 0);              /* VERSION_ACK v1 + kick */
-	wlan_wait(100);
-	printf("SWEET RPM: phase1 ack tx %x %x\n",
-	    rpm_rd32(rpm_tx_off), rpm_rd32(rpm_tx_off + 4));
+	for (i = 0; i < 2000 && !rpm_ver; i++) {
+		uint32_t pend = *(volatile uint32_t *)(gicd + GICD_ISPENDR6);
+
+		if ((pend & RPM_GIC_BIT) != 0) {
+			*(volatile uint32_t *)(gicd + GICD_ICPENDR6) = RPM_GIC_BIT;
+			wlan_mb();
+			printf("SWEET RPM: ver irq %u\n", i);
+			rpm_poll();
+		}
+		if (!rpm_ver) {
+			wlan_wait(1);
+		}
+	}
+	printf("SWEET RPM: ver state %u\n", rpm_ver);
+	if (!rpm_ver) {
+		printf("SWEET RPM: no version, stop\n");
+		return;
+	}
+	{
+		uint8_t open[32];
+		uint32_t name_len = sizeof(RPM_CHAN);
+		uint32_t olen = (8 + name_len + 7) & ~7u;
+
+		memset(open, 0, sizeof(open));
+		open[0] = 2;           /* CMD_OPEN */
+		open[2] = (uint8_t)RPM_LCID;
+		open[4] = (uint8_t)name_len;
+		memcpy(open + 8, RPM_CHAN, name_len);
+		printf("SWEET RPM: open %s (%u bytes)\n", RPM_CHAN, olen);
+		(void)rpm_tx(open, olen, NULL, 0);
+		printf("SWEET RPM: open written\n");
+	}
+	for (i = 0; i < 2000 && !rpm_open; i++) {
+		uint32_t pend = *(volatile uint32_t *)(gicd + GICD_ISPENDR6);
+
+		if ((pend & RPM_GIC_BIT) != 0) {
+			*(volatile uint32_t *)(gicd + GICD_ICPENDR6) = RPM_GIC_BIT;
+			wlan_mb();
+			printf("SWEET RPM: open irq %u\n", i);
+			rpm_poll();
+		}
+		if (!rpm_open) {
+			wlan_wait(1);
+		}
+	}
+	printf("SWEET RPM: open state %u\n", rpm_open);
+	if (!rpm_open) {
+		printf("SWEET RPM: no OPEN_ACK, stop\n");
+		return;
+	}
 	/*
 	 * 0764: the Xiaomi 4.4 icnss driver (lavender-q-oss) votes these
 	 * exact values: 800000 / 1800000 / 1304000 / 3312000 uV, rails
@@ -3485,85 +3535,8 @@ wlan_rails_on(void)
 		}
 	}
 	wlan_wait(100);
-	printf("SWEET RPM: phase1 votes tx %x %x\n",
+	printf("SWEET RPM: votes tx %x %x\n",
 	    rpm_rd32(rpm_tx_off), rpm_rd32(rpm_tx_off + 4));
-	/*
-	 * 0762: read R2AP only when the GIC reports the RPM's edge pending
-	 * (SPI 168 -> GIC ID 200 -> ISPENDR6 bit 8). Linux reads the FIFO
-	 * only from this interrupt's handler; polling the pending bit is the
-	 * same gate without IOKit. The edge latches even while the SPI is
-	 * disabled, so no GIC enable is needed.
-	 */
-	{
-		vm_offset_t gicd = ml_io_map(GICD_PA, GICD_SIZE);
-
-		if (gicd == 0) {
-			printf("SWEET RPM: GICD map failed\n");
-		} else {
-			uint32_t pend = 0;
-
-			for (i = 0; i < 500; i++) {
-				pend = *(volatile uint32_t *)(gicd +
-				    GICD_ISPENDR6);
-				if ((pend & RPM_GIC_BIT) != 0) {
-					break;
-				}
-				wlan_wait(1);
-			}
-			if ((pend & RPM_GIC_BIT) != 0) {
-				printf("SWEET RPM: gic irq at %u\n", i);
-				*(volatile uint32_t *)(gicd +
-				    GICD_ICPENDR6) = RPM_GIC_BIT;
-				wlan_mb();
-				rpm_poll();
-				printf("SWEET RPM: gic read ver %u open %u\n",
-				    rpm_ver, rpm_open);
-			} else {
-				printf("SWEET RPM: gic no irq (%x)\n", pend);
-			}
-		}
-	}
-	/*
-	 * Phase 2: OPEN last. The marker prints right after the write, so a
-	 * death after "open written" points at the RPM processing the open,
-	 * not at the AP write/kick.
-	 */
-	{
-		uint8_t open[32];
-		uint32_t name_len = sizeof(RPM_CHAN);
-		uint32_t olen = (8 + name_len + 7) & ~7u;
-
-		memset(open, 0, sizeof(open));
-		open[0] = 2;           /* CMD_OPEN */
-		open[2] = (uint8_t)RPM_LCID;
-		open[4] = (uint8_t)name_len;
-		memcpy(open + 8, RPM_CHAN, name_len);
-		printf("SWEET RPM: phase2 open %s (%u bytes)\n", RPM_CHAN,
-		    olen);
-		(void)rpm_tx(open, olen, NULL, 0);
-		printf("SWEET RPM: phase2 open written\n");
-	}
-	wlan_wait(300);
-	printf("SWEET RPM: phase2 open wait done tx %x %x\n",
-	    rpm_rd32(rpm_tx_off), rpm_rd32(rpm_tx_off + 4));
-	{
-		vm_offset_t gicd = ml_io_map(GICD_PA, GICD_SIZE);
-
-		if (gicd != 0) {
-			uint32_t pend = *(volatile uint32_t *)(gicd +
-			    GICD_ISPENDR6);
-
-			printf("SWEET RPM: phase2 pend %x\n", pend);
-			if ((pend & RPM_GIC_BIT) != 0) {
-				*(volatile uint32_t *)(gicd +
-				    GICD_ICPENDR6) = RPM_GIC_BIT;
-				wlan_mb();
-				rpm_poll();
-				printf("SWEET RPM: phase2 read ver %u open "
-				    "%u\n", rpm_ver, rpm_open);
-			}
-		}
-	}
 	printf("SWEET RPM: rails voted\n");
 }
 
