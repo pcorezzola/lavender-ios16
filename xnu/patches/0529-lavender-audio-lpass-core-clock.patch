@@ -1,7 +1,7 @@
-diff --git a/drivers/audio/lavender_audio.c b/drivers/audio/lavender_audio.c
+diff --git a/bsd/dev/lavender_audio.c b/bsd/dev/lavender_audio.c
 index dd7e212..6fe7747 100644
---- a/drivers/audio/lavender_audio.c
-+++ b/drivers/audio/lavender_audio.c
+--- a/bsd/dev/lavender_audio.c
++++ b/bsd/dev/lavender_audio.c
 @@ -325,6 +325,8 @@ struct smp2p_entry {
  #define AFE_CLK_INT4_MI2S_IBIT         0x00000113u
  #define AFE_CLK_INT_MCLK_1             0x00000306u

@@ -325,6 +325,8 @@ struct smp2p_entry {
 #define AFE_CLK_INT4_MI2S_IBIT         0x00000113u
 #define AFE_CLK_INT_MCLK_1             0x00000306u
 #define AFE_CLK_SWR_NPL                0x00000307u
+#define AFE_CLK_MCLK_1                 0x00000300u
+#define AFE_PARAM_ID_LPASS_CORE_SHARED_CLOCK 0x0001028Cu
 #define AFE_PORT_INT4_MI2S_RX          0x1036u
 
 /* ADM, F6: the playback device path (COPP) to the AFE port. */
@@ -439,6 +441,23 @@ static void
 audio_wr(vm_offset_t base, uint32_t off, uint32_t val)
 {
 	*(volatile uint32_t *)(base + off) = val;
+	__asm__ volatile("dsb sy" ::: "memory");
+}
+
+/* The LPASS digital codec registers are 8-bit. */
+static uint8_t
+audio_rd8(vm_offset_t base, uint32_t off)
+{
+	uint8_t v = *(volatile uint8_t *)(base + off);
+
+	__asm__ volatile("dsb ld" ::: "memory");
+	return v;
+}
+
+static void
+audio_wr8(vm_offset_t base, uint32_t off, uint8_t val)
+{
+	*(volatile uint8_t *)(base + off) = val;
 	__asm__ volatile("dsb sy" ::: "memory");
 }
 
@@ -2546,6 +2565,13 @@ audio_afe_port(void)
 	struct {
 		uint16_t port_id, reserved;
 	} __attribute__((packed)) start = { AFE_PORT_INT4_MI2S_RX, 0 };
+	struct {
+		uint16_t port_id, payload_size;
+		uint32_t mem[3];
+		uint32_t module, param;
+		uint16_t size, reserved;
+		uint32_t minor, enable;
+	} __attribute__((packed)) sc;
 	uint32_t ms;
 
 	if (audio_step < 10) {
@@ -2619,10 +2645,18 @@ audio_afe_port(void)
 	 * (9.6 MHz).  Without them the SWR master block is unclocked and an AP
 	 * read stalls.
 	 */
-	for (uint32_t ci = 0; ci < 2; ci++) {
-		uint32_t id = (ci == 0) ? AFE_CLK_SWR_NPL :
-		    AFE_CLK_INT_MCLK_1;
-		uint32_t hz = (ci == 0) ? 153600000u : 9600000u;
+	static const struct {
+		uint16_t id;
+		uint32_t hz;
+	} sdw_clks[] = {
+		{ AFE_CLK_SWR_NPL, 153600000u },
+		{ AFE_CLK_INT_MCLK_1, 9600000u },
+		{ AFE_CLK_MCLK_1, 11289600u },
+	};
+
+	for (uint32_t ci = 0; ci < 3; ci++) {
+		uint32_t id = sdw_clks[ci].id;
+		uint32_t hz = sdw_clks[ci].hz;
 
 		memset(&clk_pkt, 0, sizeof(clk_pkt));
 		clk_pkt.payload_size = 12 + sizeof(clk_pkt.clk);
@@ -2646,6 +2680,25 @@ audio_afe_port(void)
 		printf("SWEET AUDIO: AFE SDW clock 0x%x at %u Hz sent\n",
 		    id, hz);
 	}
+
+	/* Stock afe_enable_lpass_core_shared_clock: unlocks the LPASS core
+	 * clock that the SWR master / digital codec need, in-band on the port. */
+	memset(&sc, 0, sizeof(sc));
+	sc.port_id = AFE_PORT_INT4_MI2S_RX;
+	sc.payload_size = 12 + 8;
+	sc.module = AFE_MODULE_AUDIO_DEV_INTERFACE;
+	sc.param = AFE_PARAM_ID_LPASS_CORE_SHARED_CLOCK;
+	sc.size = 8;
+	sc.minor = 1;   /* AFE_API_VERSION_LPASS_CORE_SHARED_CLK_CONFIG */
+	sc.enable = 1;
+	(void)glink_send_apr_pkt(APR_SVC_AFE, 1, 0, AFE_PORT_CMD_SET_PARAM_V2,
+	    &sc, sizeof(sc), 50);
+	for (ms = 0; ms < 500; ms += 10) {
+		while (glink_rx_one()) {
+		}
+		audio_wait(10);
+	}
+	printf("SWEET AUDIO: LPASS core shared clock sent\n");
 }
 
 /*
@@ -2973,15 +3026,51 @@ audio_swr_state(void)
 	if (audio_step < 15) {
 		return;
 	}
-	audio_announce("LPASS core HW votes");
+	audio_announce("SWR master state after the LPASS core clock");
 	audio_wr(mclk, 0x18, 1);
 	printf("SWEET AUDIO: LPASS MCLK 0x15020018 -> %08x\n",
 	    audio_rd(mclk, 0x18));
-	(void)audio_afe_vote(3, "LPASS_H", 30, 1);   /* MACRO */
-	(void)audio_afe_vote(4, "LPASS_D", 31, 1);   /* DCODEC */
-	(void)audio_afe_vote(2, "LPASS_A", 32, 1);   /* AVTIMER */
-	audio_announce("SWR access skipped (the AP write stalls)");
+	printf("SWEET AUDIO: SWR[0000]=%08x [0004]=%08x [0008]=%08x "
+	    "[1044]=%08x [1048]=%08x\n",
+	    audio_rd(codec, 0x1000), audio_rd(codec, 0x1004),
+	    audio_rd(codec, 0x1008), audio_rd(codec, 0x1044),
+	    audio_rd(codec, 0x1048));
+	audio_announce("SWR master read done");
 }
+/*
+ * Early LPASS digital codec / PDM RX3 init, executed after the LPASS power-up
+ * and BEFORE the ADSP firmware starts.  The block is readable then (the 0500
+ * probe at ~51 s returned zeros without stalling); once the DSP audio is up an
+ * AP access to 0x152c0000 stalls.  The vendor msm-digital-cdc sequence is:
+ * PDM clock, MCLK 9.6 MHz selector, RX I2S clock (48 kHz/16-bit), RX3 unmute
+ * and RX3 MIX1 INP1 = RX3 (PDM_OUT_RX3).
+ */
+static void
+audio_dig_early_init(void)
+{
+	if (audio_step < 2) {
+		return;
+	}
+	audio_announce("early LPASS digital codec/PDM init (before ADSP)");
+	audio_wr(mclk, 0x18, 1);
+	printf("SWEET AUDIO: early MCLK 0x15020018 -> %08x\n",
+	    audio_rd(mclk, 0x18));
+	audio_wr8(codec, 0x028, 0x03);   /* CLK_PDM_CTL: PDM clock on */
+	audio_wr8(codec, 0x0a4, 0x01);   /* TOP_CTL: 9.6 MHz MCLK */
+	audio_wr8(codec, 0x024, 0x01);   /* CLK_MCLK_CTL: MCLK on */
+	audio_wr8(codec, 0x00c, 0x23);   /* CLK_RX_I2S_CTL: 48k, 16-bit */
+	audio_wr8(codec, 0x094, 0x00);   /* RX3_B6_CTL: unmute */
+	audio_wr8(codec, 0x198, 0x03);   /* CONN_RX3_B1: INP1 = RX3 */
+	audio_wr8(codec, 0x09c, 0x00);   /* RX3_VOL: 0 dB */
+	audio_wait(2);
+	printf("SWEET AUDIO: DIG early 028=%02x 0a4=%02x 024=%02x "
+	    "00c=%02x 094=%02x 198=%02x 09c=%02x\n",
+	    audio_rd8(codec, 0x028), audio_rd8(codec, 0x0a4),
+	    audio_rd8(codec, 0x024), audio_rd8(codec, 0x00c),
+	    audio_rd8(codec, 0x094), audio_rd8(codec, 0x198),
+	    audio_rd8(codec, 0x09c));
+}
+
 /* F5 read-only: the LPASS digital codec registers that feed PDM_OUT_RX3. */
 static void
 audio_dig_state(void)
