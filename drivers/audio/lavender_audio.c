@@ -3086,14 +3086,21 @@ audio_dig_early_init(void)
 	if (audio_step < 2) {
 		return;
 	}
-	audio_announce("early LPASS digital codec/PDM init (before ADSP)");
+	audio_announce("LPASS digital codec/PDM init");
 	audio_wr(mclk, 0x18, 1);
 	printf("SWEET AUDIO: early MCLK 0x15020018 -> %08x\n",
 	    audio_rd(mclk, 0x18));
-	audio_wr8(codec, 0x028, 0x03);   /* CLK_PDM_CTL: PDM clock on */
-	audio_wr8(codec, 0x0a4, 0x01);   /* TOP_CTL: 9.6 MHz MCLK */
+	printf("SWEET AUDIO: DIG write 01c (CDC_CONN)\n");
+	audio_wr8(codec, 0x01c, 0x04);   /* CLK_OTHR_CTL: CDC_CONN */
+	printf("SWEET AUDIO: DIG write 024 (CLK_MCLK)\n");
 	audio_wr8(codec, 0x024, 0x01);   /* CLK_MCLK_CTL: MCLK on */
-	audio_wr8(codec, 0x00c, 0x23);   /* CLK_RX_I2S_CTL: 48k, 16-bit */
+	printf("SWEET AUDIO: DIG write 028 (PDM)\n");
+	audio_wr8(codec, 0x028, 0x03);   /* CLK_PDM_CTL: PDM clock on */
+	printf("SWEET AUDIO: DIG write 00c (RX I2S)\n");
+	audio_wr8(codec, 0x00c, 0x33);   /* 48k, 16-bit, RX I2S clock on */
+	printf("SWEET AUDIO: DIG write 0a4 (TOP)\n");
+	audio_wr8(codec, 0x0a4, 0x00);   /* TOP_CTL: native MCLK */
+	printf("SWEET AUDIO: DIG write 094/198/09c\n");
 	audio_wr8(codec, 0x094, 0x00);   /* RX3_B6_CTL: unmute */
 	audio_wr8(codec, 0x198, 0x03);   /* CONN_RX3_B1: INP1 = RX3 */
 	audio_wr8(codec, 0x09c, 0x00);   /* RX3_VOL: 0 dB */
