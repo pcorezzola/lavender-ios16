@@ -2730,10 +2730,6 @@ audio_afe_port(void)
 		audio_wait(10);
 	}
 	printf("SWEET AUDIO: internal digital codec clock sent\n");
-
-	/* With the LPASS core clock up the digital codec accepts writes: set
-	 * the PDM RX3 path now (the early pre-ADSP attempt stalled). */
-	audio_dig_early_init();
 }
 
 /*
@@ -3558,6 +3554,9 @@ lavender_audio_thread(__unused void *arg, __unused wait_result_t wr)
 	}
 	if (audio_step >= 14) {
 		audio_pm660l_speaker();
+	}
+	if (audio_step >= 13 && audio_step <= 14) {
+		audio_dig_early_init();
 	}
 	if (audio_step >= 13) {
 		audio_asm_tone();
