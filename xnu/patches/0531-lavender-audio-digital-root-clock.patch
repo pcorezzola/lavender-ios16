@@ -1,0 +1,47 @@
+diff --git a/bsd/dev/lavender_audio.c b/bsd/dev/lavender_audio.c
+index e8b300d..0da31cb 100644
+--- a/bsd/dev/lavender_audio.c
++++ b/bsd/dev/lavender_audio.c
+@@ -2574,6 +2574,14 @@ audio_afe_port(void)
+ 		uint16_t size, reserved;
+ 		uint32_t minor, enable;
+ 	} __attribute__((packed)) sc;
++	struct {
++		uint16_t port_id, payload_size;
++		uint32_t mem[3];
++		uint32_t module, param;
++		uint16_t size, reserved;
++		uint32_t minor, clk_val;
++		uint16_t clk_root, dc_res;
++	} __attribute__((packed)) dc;
+ 	uint32_t ms;
+ 
+ 	if (audio_step < 10) {
+@@ -2702,6 +2710,27 @@ audio_afe_port(void)
+ 	}
+ 	printf("SWEET AUDIO: LPASS core shared clock sent\n");
+ 
++	/* Stock afe_set_lpass_internal_digital_codec_clock: the digital codec
++	 * root clock (11.2896 MHz, DIGT_CDC_ROOT). */
++	memset(&dc, 0, sizeof(dc));
++	dc.port_id = AFE_PORT_INT4_MI2S_RX;
++	dc.payload_size = 12 + 12;
++	dc.module = AFE_MODULE_AUDIO_DEV_INTERFACE;
++	dc.param = 0x00010239u;   /* AFE_PARAM_ID_INTERNAL_DIGIATL_CDC_CLK */
++	dc.size = 12;
++	dc.minor = 1;             /* AFE_API_VERSION_I2S_CONFIG */
++	dc.clk_val = 0xAC4400u;   /* 11.2896 MHz */
++	dc.clk_root = 5;          /* DIGT_CDC_ROOT */
++	dc.dc_res = 0;
++	(void)glink_send_apr_pkt(APR_SVC_AFE, 1, 0, AFE_PORT_CMD_SET_PARAM_V2,
++	    &dc, sizeof(dc), 51);
++	for (ms = 0; ms < 500; ms += 10) {
++		while (glink_rx_one()) {
++		}
++		audio_wait(10);
++	}
++	printf("SWEET AUDIO: internal digital codec clock sent\n");
++
+ 	/* With the LPASS core clock up the digital codec accepts writes: set
+ 	 * the PDM RX3 path now (the early pre-ADSP attempt stalled). */
+ 	audio_dig_early_init();
