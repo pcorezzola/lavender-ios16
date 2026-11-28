@@ -6,7 +6,7 @@ diff --git a/bsd/kern/sweet_amfi.c b/bsd/kern/sweet_amfi.c
 index 0ed1e88..1b4c2d0 100644
 --- a/bsd/kern/sweet_amfi.c
 +++ b/bsd/kern/sweet_amfi.c
-@@ -301,7 +301,19 @@ sweet_sandbox_syscall(struct proc *p, int call, __unused user_addr_t arg)
+@@ -301,7 +301,23 @@ sweet_sandbox_syscall(struct proc *p, int call, __unused user_addr_t arg)
  		printf("SWEET Sandbox: %s op %d\n", name, call);
  	}
  	switch (call) {
