@@ -1,0 +1,89 @@
+diff --git a/bsd/dev/lavender_wlan.c b/bsd/dev/lavender_wlan.c
+index bcac7dc..61a97aa 100644
+--- a/bsd/dev/lavender_wlan.c
++++ b/bsd/dev/lavender_wlan.c
+@@ -3075,6 +3075,8 @@ wlan_glink_start(struct smem_part_hdr *part)
+ #define RPM_LCID          1u
+ #define RPM_CHAN          "rpm_requests"
+ #define RPM_RSC_LDOA      0x616f646cu   /* "ldoa" */
++#define RPM_RSC_CLK_BUF_A 0x616b6c63u   /* "clka" */
++#define RPM_KEY_PCCB      0x62636370u   /* "pccb" pin-ctrl clk buffer */
+ #define RPM_KEY_SWEN      0x6e657773u   /* "swen" */
+ #define RPM_KEY_PCEN      0x6e656370u   /* "pcen" */
+ #define RPM_KEY_PCMD      0x646d6370u   /* "pcmd" */
+@@ -3325,8 +3327,8 @@ rpm_poll(void)
+ 
+ /* One RPM v1 request with u32 KVPs; active or sleep set. */
+ static boolean_t
+-rpm_request(uint32_t rsc_id, uint32_t set, const uint32_t *keys,
+-    const uint32_t *vals, unsigned n)
++rpm_request_ex(uint32_t rsc_type, uint32_t rsc_id, uint32_t set,
++    const uint32_t *keys, const uint32_t *vals, unsigned n)
+ {
+ 	uint8_t b[16 + 6 * 12];
+ 	uint32_t o = 16, data_len, req_len, hdr, details, id;
+@@ -3347,16 +3349,19 @@ rpm_request(uint32_t rsc_id, uint32_t set, const uint32_t *keys,
+ 	id = ++rpm_msg_id;
+ 	memcpy(b, &hdr, 4);
+ 	memcpy(b + 4, &id, 4);
+-	{
+-		uint32_t type = RPM_RSC_LDOA;
+-
+-		memcpy(b + 8, &type, 4);
+-	}
++	memcpy(b + 8, &rsc_type, 4);
+ 	memcpy(b + 12, &details, 4);
+-	printf("SWEET RPM: ldoa%u set %u: %u kvp(s)\n", rsc_id, set, n);
+ 	return rpm_data(b, o), TRUE;
+ }
+ 
++static boolean_t
++rpm_request(uint32_t rsc_id, uint32_t set, const uint32_t *keys,
++    const uint32_t *vals, unsigned n)
++{
++	printf("SWEET RPM: ldoa%u set %u: %u kvp(s)\n", rsc_id, set, n);
++	return rpm_request_ex(RPM_RSC_LDOA, rsc_id, set, keys, vals, n);
++}
++
+ static void
+ wlan_rails_on(void)
+ {
+@@ -3366,6 +3371,14 @@ wlan_rails_on(void)
+ 		return;
+ 	}
+ 	rpm_rails_done = TRUE;
++	/*
++	 * 0761: the RPM/AOSS needs a moment after AUTH_COMPLETE before the
++	 * APCS kick is safe. 0758 kicked ~0.9 s after auth and survived;
++	 * 0760 kicked 15 ms after auth and the SoC died right after the
++	 * VERSION write. Wait 3 s before touching the msgram or the APCS
++	 * register.
++	 */
++	wlan_wait(3000);
+ 	rpm_va = ml_io_map_wcomb(RPM_MSGRAM_PA, RPM_MSGRAM_SIZE);
+ 	if (rpm_va == 0) {
+ 		printf("SWEET RPM: msgram map failed\n");
+@@ -3483,6 +3496,23 @@ wlan_rails_on(void)
+ 
+ 			(void)rpm_request(19, RPM_SET_ACTIVE, k2, v, 3);
+ 		}
++		/*
++		 * 0761: icnss enables cxo_ref_clk_pin (RPM_SMD_RF_CLK1_PIN,
++		 * clock buffer 4). Without the 48 MHz ref clock the WCN3990
++		 * cannot run its ROM/firmware even with the rails on. The RPM
++		 * key is "pccb" (pin-ctrl clock buffer enable) with value 1,
++		 * voted on both the active and sleep sets.
++		 */
++		{
++			uint32_t kc[1] = { RPM_KEY_PCCB };
++			uint32_t vc[1] = { 1 };
++
++			printf("SWEET RPM: clka4 pccb=1\n");
++			(void)rpm_request_ex(RPM_RSC_CLK_BUF_A, 4,
++			    RPM_SET_ACTIVE, kc, vc, 1);
++			(void)rpm_request_ex(RPM_RSC_CLK_BUF_A, 4,
++			    RPM_SET_SLEEP, kc, vc, 1);
++		}
+ 	}
+ 	for (i = 0; i < 100; i++) {
+ 		rpm_poll();
