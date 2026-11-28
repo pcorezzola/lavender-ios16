@@ -1,0 +1,43 @@
+diff --git a/bsd/dev/lavender_audio.c b/bsd/dev/lavender_audio.c
+index 1736009..f17b81a 100644
+--- a/bsd/dev/lavender_audio.c
++++ b/bsd/dev/lavender_audio.c
+@@ -3082,30 +3082,15 @@ audio_dig_early_init(void)
+ 	if (audio_step < 2) {
+ 		return;
+ 	}
+-	audio_announce("LPASS digital codec/PDM init");
+-	printf("SWEET AUDIO: DIG write 01c (CDC_CONN)\n");
+-	audio_wr8(codec, 0x01c, 0x04);   /* CLK_OTHR_CTL: CDC_CONN */
+-	printf("SWEET AUDIO: DIG write 024 (CLK_MCLK)\n");
+-	audio_wr8(codec, 0x024, 0x01);   /* CLK_MCLK_CTL: MCLK on */
+-	printf("SWEET AUDIO: DIG write 028 (PDM)\n");
+-	audio_wr8(codec, 0x028, 0x03);   /* CLK_PDM_CTL: PDM clock on */
+-	printf("SWEET AUDIO: DIG write 00c (RX I2S)\n");
+-	audio_wr8(codec, 0x00c, 0x33);   /* 48k, 16-bit, RX I2S clock on */
+-	printf("SWEET AUDIO: DIG write 0a4 (TOP)\n");
+-	audio_wr8(codec, 0x0a4, 0x00);   /* TOP_CTL: native MCLK */
+-	printf("SWEET AUDIO: DIG write 094/198/09c\n");
+-	audio_wr8(codec, 0x094, 0x00);   /* RX3_B6_CTL: unmute */
+-	audio_wr8(codec, 0x198, 0x03);   /* CONN_RX3_B1: INP1 = RX3 */
+-	audio_wr8(codec, 0x09c, 0x00);   /* RX3_VOL: 0 dB */
+-	audio_wait(2);
+-	printf("SWEET AUDIO: DIG early 028=%02x 0a4=%02x 024=%02x "
+-	    "00c=%02x 094=%02x 198=%02x 09c=%02x\n",
+-	    audio_rd8(codec, 0x028), audio_rd8(codec, 0x0a4),
+-	    audio_rd8(codec, 0x024), audio_rd8(codec, 0x00c),
+-	    audio_rd8(codec, 0x094), audio_rd8(codec, 0x198),
+-	    audio_rd8(codec, 0x09c));
++		audio_announce("LPASS digital codec ID probe (read only)");
++	printf("SWEET AUDIO: DIG id 000=%02x 004=%02x 008=%02x 00c=%02x "
++	    "024=%02x 028=%02x 0a4=%02x 094=%02x 198=%02x\n",
++	    audio_rd8(codec, 0x000), audio_rd8(codec, 0x004),
++	    audio_rd8(codec, 0x008), audio_rd8(codec, 0x00c),
++	    audio_rd8(codec, 0x024), audio_rd8(codec, 0x028),
++	    audio_rd8(codec, 0x0a4), audio_rd8(codec, 0x094),
++	    audio_rd8(codec, 0x198));
+ }
+-
+ /* F5 read-only: the LPASS digital codec registers that feed PDM_OUT_RX3. */
+ static void
+ audio_dig_state(void)
