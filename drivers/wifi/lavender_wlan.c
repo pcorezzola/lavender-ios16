@@ -3436,16 +3436,21 @@ wlan_rails_on(void)
 	}
 	{
 		uint32_t g = *(volatile uint32_t *)(gicd + 0x098);
-		uint32_t c = *(volatile uint32_t *)(gicd + 0xc18);
+		uint32_t c = *(volatile uint32_t *)(gicd + 0xc30);
 
 		*(volatile uint32_t *)(gicd + 0x098) = g | RPM_GIC_BIT;
-		*(volatile uint32_t *)(gicd + 0xc18) =
+		*(volatile uint32_t *)(gicd + 0xc30) =
 		    (c & ~0x30000u) | 0x20000u;
 		wlan_mb();
-		printf("SWEET RPM: gic grp %x cfg %x\n", g, c);
+		printf("SWEET RPM: gic grp %x cfg %x -> %x %x\n",
+		    g, c, *(volatile uint32_t *)(gicd + 0x098),
+		    *(volatile uint32_t *)(gicd + 0xc30));
 	}
 	/*
-	 * 0768: the RPM negotiated GLINK with ABL before booting iOS, so
+	 * 0769: ICFGR holds 16 interrupts per register, so ID 200 uses
+	 * ICFGR12 (0xC30), not ICFGR6. The earlier builds left the
+	 * SPI level-triggered and a pulsed RPM kick could be missed.
+	 * The RPM negotiated GLINK with ABL before booting iOS, so
 	 * its core is already OPENED and glink_core_rx_cmd_version()
 	 * returns early on our VERSION without replying (0765-0767: the
 	 * message is consumed, tx read == head, but no interrupt). Skip
