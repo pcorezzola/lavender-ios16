@@ -106,8 +106,6 @@
 #include <vm/memory_types.h>
 
 extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
-extern vm_map_t kernel_map;
-extern pmap_t kernel_pmap;
 extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
 
 #define CAM_NITEMS(a)   (sizeof(a) / sizeof((a)[0]))
