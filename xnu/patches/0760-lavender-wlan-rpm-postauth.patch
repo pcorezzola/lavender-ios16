@@ -1,0 +1,67 @@
+diff --git a/bsd/dev/lavender_wlan.c b/bsd/dev/lavender_wlan.c
+index a1a42b2..bcac7dc 100644
+--- a/bsd/dev/lavender_wlan.c
++++ b/bsd/dev/lavender_wlan.c
+@@ -3401,16 +3401,15 @@ wlan_rails_on(void)
+ 		return;
+ 	}
+ 	/*
+-	 * 0759: GLINK handshake in the correct order. 0758 proved the ABL
+-	 * indices are 0 and the IPC kick alone is harmless, so the reboot of
+-	 * 0756/0757 came from issuing OPEN before the version exchange was
+-	 * complete (the RPM answers VERSION and expects our VERSION_ACK
+-	 * before it accepts a channel open).  Send VERSION, read the RX
+-	 * descriptor once (first read after the kick), wait for the RPM's
+-	 * VERSION/ACK, then open the channel and wait for OPEN_ACK.
++	 * 0760: the whole RPM sequence now runs after the modem auth (the
++	 * pre-auth kick panicked, 0759). VERSION, then a short wait so any
++	 * asynchronous platform error from the kick lands before we touch the
++	 * RX descriptor, then poll for the RPM's VERSION/ACK, then OPEN and
++	 * wait for OPEN_ACK.
+ 	 */
+ 	printf("SWEET RPM: send version\n");
+ 	rpm_cmd(0, 0, 0);              /* VERSION with the IPC kick */
++	wlan_wait(50);
+ 	printf("SWEET RPM: version sent, rx %x %x\n",
+ 	    rpm_rd32(rpm_rx_off), rpm_rd32(rpm_rx_off + 4));
+ 	for (i = 0; i < 200 && !rpm_ver; i++) {
+@@ -3440,6 +3439,7 @@ wlan_rails_on(void)
+ 		printf("SWEET RPM: open %s (%u bytes)\n", RPM_CHAN, olen);
+ 		(void)rpm_tx(open, olen, NULL, 0);
+ 	}
++	wlan_wait(20);
+ 	for (i = 0; i < 300 && !rpm_open; i++) {
+ 		rpm_poll();
+ 		if ((i % 50) == 0) {
+@@ -3685,26 +3685,12 @@ lavender_wlan_thread(__unused void *arg, __unused wait_result_t wr_)
+ 	}
+ 	if (wlan_mode >= 2) {
+ 		/*
+-		 * 0756: vote the WCN3990 rails after the NCM capture is up
+-		 * (t~10-60) but before the modem's WLAN PD starts (t~150),
+-		 * so the RPM trace and any panic land in the shared log.
+-		 * At t~2 the panic happened before USB existed (0755).
++		 * 0760: the RPM/AOSS does not tolerate the IPC kick before the
++		 * modem authenticates (0759 panicked at t=75 with an
++		 * implementation-specific platform error; 0758 kicked at t=133,
++		 * after auth, and was fine). All RPM work now happens in
++		 * lavender_wlan_after_modem(), right after AUTH_COMPLETE.
+ 		 */
+-		uint32_t rpm_delay = 75;
+-
+-		(void)PE_parse_boot_argn("sweetrpmmdelay", &rpm_delay,
+-		    sizeof(rpm_delay));
+-		if (rpm_delay > 200) {
+-			rpm_delay = 200;
+-		}
+-		printf("SWEET WLAN: F2 RPM rails in %u s\n", rpm_delay);
+-		wlan_wait(rpm_delay * 1000);
+-		printf("SWEET WLAN: F2 early RPM rails, before the modem\n");
+-		apcs = ml_io_map(APCS_PA, APCS_SIZE);
+-		if (apcs == 0) {
+-			printf("SWEET WLAN: APCS map failed\n");
+-		}
+-		wlan_rails_on();
+ 		printf("SWEET WLAN: F2 probe waits for the modem auth\n");
+ 		return;
+ 	}
