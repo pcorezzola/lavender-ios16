@@ -1,0 +1,14 @@
+diff --git a/bsd/dev/lavender_audio.c b/bsd/dev/lavender_audio.c
+index 681f9e3..1736009 100644
+--- a/bsd/dev/lavender_audio.c
++++ b/bsd/dev/lavender_audio.c
+@@ -3083,9 +3083,6 @@ audio_dig_early_init(void)
+ 		return;
+ 	}
+ 	audio_announce("LPASS digital codec/PDM init");
+-	audio_wr(mclk, 0x18, 1);
+-	printf("SWEET AUDIO: early MCLK 0x15020018 -> %08x\n",
+-	    audio_rd(mclk, 0x18));
+ 	printf("SWEET AUDIO: DIG write 01c (CDC_CONN)\n");
+ 	audio_wr8(codec, 0x01c, 0x04);   /* CLK_OTHR_CTL: CDC_CONN */
+ 	printf("SWEET AUDIO: DIG write 024 (CLK_MCLK)\n");
