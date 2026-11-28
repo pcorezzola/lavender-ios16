@@ -1,0 +1,77 @@
+diff --git a/bsd/dev/lavender_audio.c b/bsd/dev/lavender_audio.c
+index dd7e212..c434acd 100644
+--- a/bsd/dev/lavender_audio.c
++++ b/bsd/dev/lavender_audio.c
+@@ -442,6 +442,23 @@ audio_wr(vm_offset_t base, uint32_t off, uint32_t val)
+ 	__asm__ volatile("dsb sy" ::: "memory");
+ }
+ 
++/* The LPASS digital codec registers are 8-bit. */
++static uint8_t
++audio_rd8(vm_offset_t base, uint32_t off)
++{
++	uint8_t v = *(volatile uint8_t *)(base + off);
++
++	__asm__ volatile("dsb ld" ::: "memory");
++	return v;
++}
++
++static void
++audio_wr8(vm_offset_t base, uint32_t off, uint8_t val)
++{
++	*(volatile uint8_t *)(base + off) = val;
++	__asm__ volatile("dsb sy" ::: "memory");
++}
++
+ /*
+  * The carve-out mapping is Device-nGnRnE. XNU's memset/memcpy store engine
+  * emits STNP pairs, which are not safe on Device memory (the modem's 0247
+@@ -2982,6 +2999,40 @@ audio_swr_state(void)
+ 	(void)audio_afe_vote(2, "LPASS_A", 32, 1);   /* AVTIMER */
+ 	audio_announce("SWR access skipped (the AP write stalls)");
+ }
++/*
++ * Early LPASS digital codec / PDM RX3 init, executed after the LPASS power-up
++ * and BEFORE the ADSP firmware starts.  The block is readable then (the 0500
++ * probe at ~51 s returned zeros without stalling); once the DSP audio is up an
++ * AP access to 0x152c0000 stalls.  The vendor msm-digital-cdc sequence is:
++ * PDM clock, MCLK 9.6 MHz selector, RX I2S clock (48 kHz/16-bit), RX3 unmute
++ * and RX3 MIX1 INP1 = RX3 (PDM_OUT_RX3).
++ */
++static void
++audio_dig_early_init(void)
++{
++	if (audio_step < 2) {
++		return;
++	}
++	audio_announce("early LPASS digital codec/PDM init (before ADSP)");
++	audio_wr(mclk, 0x18, 1);
++	printf("SWEET AUDIO: early MCLK 0x15020018 -> %08x\n",
++	    audio_rd(mclk, 0x18));
++	audio_wr8(codec, 0x028, 0x03);   /* CLK_PDM_CTL: PDM clock on */
++	audio_wr8(codec, 0x0a4, 0x01);   /* TOP_CTL: 9.6 MHz MCLK */
++	audio_wr8(codec, 0x024, 0x01);   /* CLK_MCLK_CTL: MCLK on */
++	audio_wr8(codec, 0x00c, 0x23);   /* CLK_RX_I2S_CTL: 48k, 16-bit */
++	audio_wr8(codec, 0x094, 0x00);   /* RX3_B6_CTL: unmute */
++	audio_wr8(codec, 0x198, 0x03);   /* CONN_RX3_B1: INP1 = RX3 */
++	audio_wr8(codec, 0x09c, 0x00);   /* RX3_VOL: 0 dB */
++	audio_wait(2);
++	printf("SWEET AUDIO: DIG early 028=%02x 0a4=%02x 024=%02x "
++	    "00c=%02x 094=%02x 198=%02x 09c=%02x\n",
++	    audio_rd8(codec, 0x028), audio_rd8(codec, 0x0a4),
++	    audio_rd8(codec, 0x024), audio_rd8(codec, 0x00c),
++	    audio_rd8(codec, 0x094), audio_rd8(codec, 0x198),
++	    audio_rd8(codec, 0x09c));
++}
++
+ /* F5 read-only: the LPASS digital codec registers that feed PDM_OUT_RX3. */
+ static void
+ audio_dig_state(void)
+@@ -3346,6 +3397,7 @@ lavender_audio_thread(__unused void *arg, __unused wait_result_t wr)
+ 
+ 	if (audio_step >= 2) {
+ 		(void)audio_power_up();
++		audio_dig_early_init();
+ 	}
+ 
+ 	q6ss = ml_io_map(Q6SS_PA, Q6SS_SIZE);
