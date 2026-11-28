@@ -1,0 +1,171 @@
+diff --git a/bsd/dev/lavender_cam.c b/bsd/dev/lavender_cam.c
+index 48fbf7e..0c62196 100644
+--- a/bsd/dev/lavender_cam.c
++++ b/bsd/dev/lavender_cam.c
+@@ -24,6 +24,10 @@
+  *                   this at lvcam=3). 1011 prints one line before every
+  *                   access and gives the flusher 300 ms, so the last line
+  *                   of a frozen boot names the access that wedged it.
++ *   lvcam=5         F2a: power the VFE0/CSID0/CSI0 clock tree (VFE0 GDSC,
++ *                   vfe0/csi0 RCGs at 120/200 MHz, AHB/core/pix/rdi
++ *                   branches), read the VFE48 and CSID v3.5 hardware
++ *                   versions, and put everything back.
+  *   lvcamdelay=S    seconds to wait after boot before the probe (default 25),
+  *                   so the console ring flusher and the USB live log are up
+  *   lvcamspmi=S     (1012) spawn a helper thread that reads the SPMI
+@@ -1403,6 +1407,136 @@ cam_f1(void)
+ 	cam_f1_rails_down();
+ }
+ 
++/*
++ * 1017, F2a: power the VFE0/CSID0/CSI0 clock tree and read the block
++ * versions. mmcc-sdm660.c: vfe0_clk_src at 0x3600 (GPLL0/5 = 120 MHz),
++ * csi0_clk_src at 0x3090 (GPLL0/3 = 200 MHz), branches vfe0_ahb 0x3668,
++ * vfe0 0x36a8, vfe0_stream 0x3720, csi_vfe0 0x3704, csi0 0x30b4,
++ * csi0_ahb 0x30bc, csi0pix 0x30e4, csi0rdi 0x30d4. VFE48 HW version is at
++ * the VFE base (top nibble 8); CSID v3.5 reports 0x30050000 at csid+0.
++ */
++#define CAM_MMCC_VFE0_CLK_SRC       0x3600u
++#define CAM_MMCC_CSI0_CLK_SRC       0x3090u
++#define CAM_CFG_VFE0_120MHZ         0x0609u  /* div 5 (field 9), src GPLL0=6 */
++#define CAM_CFG_CSI0_200MHZ         0x0505u  /* div 3 (field 5), src GPLL0=5 */
++#define CAM_CSID0_OFF               0x00030000u
++
++static int
++cam_branch_on(uint32_t off)
++{
++	uint32_t v = cam_rd(mmcc, off);
++
++	cam_wr(mmcc, off, v | CAM_CBCR_EN);
++	return cam_poll(mmcc, off, CAM_CBCR_CLK_OFF, 0, 20);
++}
++
++static void
++cam_branch_off(uint32_t off)
++{
++	cam_wr(mmcc, off, cam_rd(mmcc, off) & ~CAM_CBCR_EN);
++}
++
++static void
++cam_rcg_on(uint32_t off, uint32_t cfg)
++{
++	uint32_t v;
++	unsigned i;
++
++	v = cam_rd(mmcc, off + 4u) & ~0x7fffu;
++	cam_wr(mmcc, off + 4u, v | cfg);
++	v = cam_rd(mmcc, off);
++	cam_wr(mmcc, off, v | CAM_RCG_CMD_UPDATE);
++	for (i = 0; i < 500; i++) {
++		if (!(cam_rd(mmcc, off) & CAM_RCG_CMD_UPDATE)) {
++			break;
++		}
++		cam_spin_us(1);
++	}
++	v = cam_rd(mmcc, off);
++	cam_wr(mmcc, off, (v | CAM_RCG_CMD_ROOT_EN) & ~CAM_RCG_CMD_ROOT_OFF);
++	for (i = 0; i < 1000; i++) {
++		if (!(cam_rd(mmcc, off) & CAM_RCG_CMD_ROOT_OFF)) {
++			break;
++		}
++		cam_wait(1);
++	}
++}
++
++static void
++cam_f2a(void)
++{
++	uint32_t v;
++	unsigned errors = 0;
++
++	printf("SWEET CAM: F2a: powering the VFE0/CSID0/CSI0 tree\n");
++	if (cam_domain_power_up() != 0) {
++		printf("SWEET CAM: F2a: camss_top did not come up\n");
++		return;
++	}
++	cam_ahb_power_up();
++
++	v = cam_rd(mmcc, CAM_MMCC_CAMSS_VFE0_GDSCR);
++	if ((v & CAM_GDSC_SW_COLLAPSE) != 0 || (v & CAM_GDSC_PWR_ON) == 0) {
++		cam_wr(mmcc, CAM_MMCC_CAMSS_VFE0_GDSCR,
++		    v & ~CAM_GDSC_SW_COLLAPSE);
++		if (cam_poll(mmcc, CAM_MMCC_CAMSS_VFE0_GDSCR,
++		    CAM_GDSC_PWR_ON, CAM_GDSC_PWR_ON, 20) != 0) {
++			printf("SWEET CAM: F2a: vfe0 GDSC did not power on\n");
++		}
++	}
++	printf("SWEET CAM: F2a: vfe0 gdscr %08x\n",
++	    cam_rd(mmcc, CAM_MMCC_CAMSS_VFE0_GDSCR));
++
++	cam_rcg_on(CAM_MMCC_VFE0_CLK_SRC, CAM_CFG_VFE0_120MHZ);
++	cam_rcg_on(CAM_MMCC_CSI0_CLK_SRC, CAM_CFG_CSI0_200MHZ);
++	printf("SWEET CAM: F2a: vfe0_src cmd %08x cfg %08x, csi0_src cmd %08x "
++	    "cfg %08x\n", cam_rd(mmcc, CAM_MMCC_VFE0_CLK_SRC),
++	    cam_rd(mmcc, CAM_MMCC_VFE0_CLK_SRC + 4u),
++	    cam_rd(mmcc, CAM_MMCC_CSI0_CLK_SRC),
++	    cam_rd(mmcc, CAM_MMCC_CSI0_CLK_SRC + 4u));
++
++	errors += cam_branch_on(0x3668u) != 0;   /* vfe0_ahb */
++	errors += cam_branch_on(0x36a8u) != 0;   /* vfe0 */
++	errors += cam_branch_on(0x3720u) != 0;   /* vfe0_stream */
++	errors += cam_branch_on(0x3704u) != 0;   /* csi_vfe0 */
++	errors += cam_branch_on(0x30bcu) != 0;   /* csi0_ahb */
++	errors += cam_branch_on(0x30b4u) != 0;   /* csi0 */
++	errors += cam_branch_on(0x30e4u) != 0;   /* csi0pix */
++	errors += cam_branch_on(0x30d4u) != 0;   /* csi0rdi */
++	printf("SWEET CAM: F2a: vfe0_ahb %08x vfe0 %08x stream %08x csi_vfe0 "
++	    "%08x\n", cam_rd(mmcc, 0x3668u), cam_rd(mmcc, 0x36a8u),
++	    cam_rd(mmcc, 0x3720u), cam_rd(mmcc, 0x3704u));
++	printf("SWEET CAM: F2a: csi0_ahb %08x csi0 %08x pix %08x rdi %08x "
++	    "(%u halted)\n", cam_rd(mmcc, 0x30bcu), cam_rd(mmcc, 0x30b4u),
++	    cam_rd(mmcc, 0x30e4u), cam_rd(mmcc, 0x30d4u), errors);
++
++	if (camss == 0) {
++		camss = ml_io_map(CAM_CAMSS_PA, CAM_CAMSS_SIZE);
++	}
++	if (camss != 0) {
++		printf("SWEET CAM: F2a: vfe0 hw version %08x (want top nibble 8)\n",
++		    cam_rd(camss, 0x0u));
++		printf("SWEET CAM: F2a: csid0 hw version %08x (want 30050000)\n",
++		    cam_rd(camss, CAM_CSID0_OFF));
++	} else {
++		printf("SWEET CAM: F2a: CAMSS map failed\n");
++	}
++
++	cam_branch_off(0x30d4u);
++	cam_branch_off(0x30e4u);
++	cam_branch_off(0x30b4u);
++	cam_branch_off(0x30bcu);
++	cam_branch_off(0x3704u);
++	cam_branch_off(0x3720u);
++	cam_branch_off(0x36a8u);
++	cam_branch_off(0x3668u);
++	v = cam_rd(mmcc, CAM_MMCC_CAMSS_VFE0_GDSCR);
++	cam_wr(mmcc, CAM_MMCC_CAMSS_VFE0_GDSCR, v | CAM_GDSC_SW_COLLAPSE);
++	cam_ahb_power_down();
++	cam_domain_power_down();
++	printf("SWEET CAM: F2a done\n");
++}
++
+ /*
+  * 1012: read the SPMI arbiter version from a helper thread at a chosen
+  * moment, before the probe touches anything. A stalled read loses only this
+@@ -1508,13 +1642,17 @@ lavender_cam_thread(__unused void *arg, __unused wait_result_t wr)
+ 	tlmm = ml_io_map(CAM_TLMM_SOUTH_PA, CAM_TLMM_SOUTH_SIZE);
+ 	if (tlmm != 0) {
+ 		cam_gpios();
+-		if (cam_step >= 3) {
++		if (cam_step == 3 || cam_step == 4) {
+ 			cam_f1();
+ 		}
+ 	} else {
+ 		printf("SWEET CAM: TLMM map failed\n");
+ 	}
+ 
++	if (cam_step >= 5) {
++		cam_f2a();
++	}
++
+ 	smmu_mmss = ml_io_map(CAM_SMMU_PA, CAM_SMMU_SIZE);
+ 	if (smmu_mmss != 0) {
+ 		cam_smmu();
