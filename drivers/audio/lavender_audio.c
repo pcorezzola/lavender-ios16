@@ -2541,6 +2541,8 @@ audio_glink_apr(void)
 	    glink_tx_msgs, glink_rx_msgs);
 }
 
+static void audio_dig_early_init(void);
+
 /*
  * F5: AFE INT4_MI2S_RX. SET_PARAM_V2 carries the I2S configuration (48 kHz,
  * 16-bit, SD0, stereo, internal WS), then DEVICE_START starts the port.
@@ -2699,6 +2701,10 @@ audio_afe_port(void)
 		audio_wait(10);
 	}
 	printf("SWEET AUDIO: LPASS core shared clock sent\n");
+
+	/* With the LPASS core clock up the digital codec accepts writes: set
+	 * the PDM RX3 path now (the early pre-ADSP attempt stalled). */
+	audio_dig_early_init();
 }
 
 /*
