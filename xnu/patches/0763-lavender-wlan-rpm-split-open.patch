@@ -1,0 +1,113 @@
+diff --git a/bsd/dev/lavender_wlan.c b/bsd/dev/lavender_wlan.c
+index 872a627..cc7020a 100644
+--- a/bsd/dev/lavender_wlan.c
++++ b/bsd/dev/lavender_wlan.c
+@@ -3419,36 +3419,23 @@ wlan_rails_on(void)
+ 		return;
+ 	}
+ 	/*
+-	 * 0762: blind handshake, no RX FIFO reads until the GIC latch says
+-	 * the RPM has data. 0758 (the only build that survived) never read
+-	 * R2AP after kicking; 0759 died in the poll and 0760/0761 died on
+-	 * the first read, so an AP read while the AOSS SRAM is not awake
+-	 * returns a platform error. Linux reads the FIFO only inside the
+-	 * RPM IRQ handler (SPI 168). The transport table in
+-	 * glink_smem_native_xprt.c negotiates GLINK version 1.
++	 * 0763: split the handshake. Phase 1 (no OPEN): VERSION v1, ACK v1
++	 * and the rail/clock votes, printing the TX read index (owned by the
++	 * RPM) to see whether it consumed our messages, and reading R2AP
++	 * only when the GIC latch for SPI 168 is pending. 0762 died within
++	 * 200 ms of the OPEN write while VERSION and ACK had survived, so
++	 * phase 2 then sends the OPEN with a marker right after the write.
+ 	 */
+-	printf("SWEET RPM: send version\n");
+-	rpm_cmd(0, 1, 0);              /* VERSION v1 with the IPC kick */
++	printf("SWEET RPM: phase1 version\n");
++	rpm_cmd(0, 1, 0);              /* VERSION v1 + IPC kick */
+ 	wlan_wait(100);
+-	printf("SWEET RPM: blind ack\n");
+-	rpm_cmd(1, 1, 0);              /* VERSION_ACK v1 */
++	printf("SWEET RPM: phase1 ver tx %x %x\n",
++	    rpm_rd32(rpm_tx_off), rpm_rd32(rpm_tx_off + 4));
++	printf("SWEET RPM: phase1 ack\n");
++	rpm_cmd(1, 1, 0);              /* VERSION_ACK v1 + kick */
+ 	wlan_wait(100);
+-	printf("SWEET RPM: blind open\n");
+-	{
+-		uint8_t open[32];
+-		uint32_t name_len = sizeof(RPM_CHAN);
+-		uint32_t olen = (8 + name_len + 7) & ~7u;
+-
+-		memset(open, 0, sizeof(open));
+-		open[0] = 2;           /* CMD_OPEN */
+-		open[2] = (uint8_t)RPM_LCID;
+-		open[4] = (uint8_t)name_len;
+-		memcpy(open + 8, RPM_CHAN, name_len);
+-		printf("SWEET RPM: open %s (%u bytes)\n", RPM_CHAN, olen);
+-		(void)rpm_tx(open, olen, NULL, 0);
+-	}
+-	wlan_wait(200);
+-	printf("SWEET RPM: blind handshake done\n");
++	printf("SWEET RPM: phase1 ack tx %x %x\n",
++	    rpm_rd32(rpm_tx_off), rpm_rd32(rpm_tx_off + 4));
+ 	/*
+ 	 * ath10k's vreg order for this node: 0.8 (swen), 1.8 (pcen), 1.3
+ 	 * (pcen), 3.3 (pcen). Values are the min of vdd-*-config from the
+@@ -3496,6 +3483,9 @@ wlan_rails_on(void)
+ 			    RPM_SET_SLEEP, kc, vc, 1);
+ 		}
+ 	}
++	wlan_wait(100);
++	printf("SWEET RPM: phase1 votes tx %x %x\n",
++	    rpm_rd32(rpm_tx_off), rpm_rd32(rpm_tx_off + 4));
+ 	/*
+ 	 * 0762: read R2AP only when the GIC reports the RPM's edge pending
+ 	 * (SPI 168 -> GIC ID 200 -> ISPENDR6 bit 8). Linux reads the FIFO
+@@ -3532,6 +3522,47 @@ wlan_rails_on(void)
+ 			}
+ 		}
+ 	}
++	/*
++	 * Phase 2: OPEN last. The marker prints right after the write, so a
++	 * death after "open written" points at the RPM processing the open,
++	 * not at the AP write/kick.
++	 */
++	{
++		uint8_t open[32];
++		uint32_t name_len = sizeof(RPM_CHAN);
++		uint32_t olen = (8 + name_len + 7) & ~7u;
++
++		memset(open, 0, sizeof(open));
++		open[0] = 2;           /* CMD_OPEN */
++		open[2] = (uint8_t)RPM_LCID;
++		open[4] = (uint8_t)name_len;
++		memcpy(open + 8, RPM_CHAN, name_len);
++		printf("SWEET RPM: phase2 open %s (%u bytes)\n", RPM_CHAN,
++		    olen);
++		(void)rpm_tx(open, olen, NULL, 0);
++		printf("SWEET RPM: phase2 open written\n");
++	}
++	wlan_wait(300);
++	printf("SWEET RPM: phase2 open wait done tx %x %x\n",
++	    rpm_rd32(rpm_tx_off), rpm_rd32(rpm_tx_off + 4));
++	{
++		vm_offset_t gicd = ml_io_map(GICD_PA, GICD_SIZE);
++
++		if (gicd != 0) {
++			uint32_t pend = *(volatile uint32_t *)(gicd +
++			    GICD_ISPENDR6);
++
++			printf("SWEET RPM: phase2 pend %x\n", pend);
++			if ((pend & RPM_GIC_BIT) != 0) {
++				*(volatile uint32_t *)(gicd +
++				    GICD_ICPENDR6) = RPM_GIC_BIT;
++				wlan_mb();
++				rpm_poll();
++				printf("SWEET RPM: phase2 read ver %u open "
++				    "%u\n", rpm_ver, rpm_open);
++			}
++		}
++	}
+ 	printf("SWEET RPM: rails voted\n");
+ }
+ 
