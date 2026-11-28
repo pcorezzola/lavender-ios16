@@ -3437,31 +3437,32 @@ wlan_rails_on(void)
 	printf("SWEET RPM: phase1 ack tx %x %x\n",
 	    rpm_rd32(rpm_tx_off), rpm_rd32(rpm_tx_off + 4));
 	/*
-	 * ath10k's vreg order for this node: 0.8 (swen), 1.8 (pcen), 1.3
-	 * (pcen), 3.3 (pcen). Values are the min of vdd-*-config from the
-	 * icnss node; pcmd 2 is qcom,init-pin-ctrl-mode.
+	 * 0764: the Xiaomi 4.4 icnss driver (lavender-q-oss) votes these
+	 * exact values: 800000 / 1800000 / 1304000 / 3312000 uV, rails
+	 * first and cxo_ref_clk_pin after them. pcen 2 is the enabled
+	 * pin-ctrl value and pcmd 2 is qcom,init-pin-ctrl-mode.
 	 */
 	{
 		uint32_t k2[3] = { RPM_KEY_PCEN, RPM_KEY_PCMD, RPM_KEY_UV };
 		uint32_t k1[2] = { RPM_KEY_SWEN, RPM_KEY_UV };
 
 		{
-			uint32_t v[2] = { 1, 848000 };
+			uint32_t v[2] = { 1, 800000 };
 
 			(void)rpm_request(5, RPM_SET_ACTIVE, k1, v, 2);
 		}
 		{
-			uint32_t v[3] = { 2, 2, 1750000 };
+			uint32_t v[3] = { 2, 2, 1800000 };
 
 			(void)rpm_request(9, RPM_SET_ACTIVE, k2, v, 3);
 		}
 		{
-			uint32_t v[3] = { 2, 2, 1200000 };
+			uint32_t v[3] = { 2, 2, 1304000 };
 
 			(void)rpm_request(6, RPM_SET_ACTIVE, k2, v, 3);
 		}
 		{
-			uint32_t v[3] = { 2, 2, 3200000 };
+			uint32_t v[3] = { 2, 2, 3312000 };
 
 			(void)rpm_request(19, RPM_SET_ACTIVE, k2, v, 3);
 		}
