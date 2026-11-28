@@ -1,0 +1,20 @@
+From: port_ios lavender
+Subject: [PATCH 0365] lavender gpu: lav_buf_new.pad bit 0 asks for a cacheable (write-back) buffer of its own, outside the pool
+
+---
+diff --git a/iokit/Kernel/arm/LavenderGPU.cpp b/iokit/Kernel/arm/LavenderGPU.cpp
+--- a/iokit/Kernel/arm/LavenderGPU.cpp
++++ b/iokit/Kernel/arm/LavenderGPU.cpp
+@@ -338,4 +338,4 @@
+ 		return kIOReturnBadArgument;
+ 	}
+-	if (gPool != NULL) {
++	if (gPool != NULL && !(request->pad & 1)) {
+ 		int64_t first;
+@@ -362,5 +362,5 @@
+ 		npages = 0;
+ 		/* below 4 GB and in one piece: the GPU's page table is the identity of the first four gigabytes */
+ 		memory = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,
+-		    kIODirectionInOut | kIOMemoryPhysicallyContiguous | kIOMapWriteCombineCache,
++		    kIODirectionInOut | kIOMemoryPhysicallyContiguous | ((request->pad & 1) ? 0 : kIOMapWriteCombineCache),
+ 		    size, 0x00000000FFFFF000ULL);

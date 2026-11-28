@@ -1,0 +1,14 @@
+From: port_ios lavender
+Subject: [PATCH 0364] lavender gpu: CB4 TCR.IPS = 40 bit (output addresses above 4 GB were invalid)
+
+---
+diff --git a/bsd/dev/lavender_gpu.c b/bsd/dev/lavender_gpu.c
+--- a/bsd/dev/lavender_gpu.c
++++ b/bsd/dev/lavender_gpu.c
+@@ -837,5 +837,5 @@
+ 	wr(smmu_va, SMMU_CBAR(SMMU_CB), 1u << 16);             /* S1 translate, S2 bypass */
+ 	wr(cb, CB_TCR2, 0x1u);                                 /* 36-bit output */
+-	wr(cb, CB_TCR, 25u | (1u << 8) | (1u << 10) | (3u << 12)); /* 39-bit VA, 4K, WB, inner */
++	wr(cb, CB_TCR, 25u | (2u << 16) | (1u << 8) | (1u << 10) | (3u << 12)); /* 39-bit VA, 4K, WB, inner */
+ 	wr(cb, CB_MAIR0, 0xffu);
+ 	wr(cb, CB_TTBR0, (uint32_t)pa);

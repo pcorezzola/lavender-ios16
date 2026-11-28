@@ -1,0 +1,39 @@
+diff --git a/osfmk/kern/exception.c b/osfmk/kern/exception.c
+index a20a764..d21140e 100644
+--- a/osfmk/kern/exception.c
++++ b/osfmk/kern/exception.c
+@@ -873,6 +873,34 @@ sweet_crash_log(const char *name, int pid, int sig, uint64_t code, uint64_t subc
+ 	}
+ 	printf("%s\n", line);
+ 
++	/*
++	 * SWEET: libc++abi's abort_message() formats the abort text ("terminating
++	 * with uncaught exception of type NSException: ...") with vasprintf and
++	 * stores the heap pointer in a __DATA global for the crash reporter,
++	 * right before calling abort(). On the 20H392 cache the global is at
++	 * cache-relative 0x1dee72e28 (libc++abi __DATA 0x1dee72d90 + 0x98; the
++	 * store is the instruction at 0x1d1adef4c, and the FAR of the
++	 * assetsd/AegirPoster SIGABRTs equals slide + 0x1dee72e28). Read it with
++	 * copyin so every SIGABRT prints the real exception text.
++	 */
++	if (sig == 6 && slide != 0) {
++		uint64_t msgp = 0;
++		char msg[288];
++
++		if (copyin((user_addr_t)(slide + 0x1dee72e28ull), &msgp,
++		    sizeof(msgp)) != 0) {
++			printf("CRASH %s abort-message: global unreadable\n", name);
++		} else if (msgp == 0) {
++			printf("CRASH %s abort-message: ptr 0 (store never landed)\n",
++			    name);
++		} else if (copyin(msgp, msg, sizeof(msg) - 1) == 0) {
++			msg[sizeof(msg) - 1] = '\0';
++			printf("CRASH %s abort-message: %s\n", name, msg);
++		} else {
++			printf("CRASH %s abort-message: ptr 0x%llx unreadable\n",
++			    name, msgp);
++		}
++	}
+ 	if (sig == 11 || sig == 10) {
+ 		/* Which mapping the faulting address is in, or which two it falls between. */
+ 		uint64_t far = (uint64_t)saved_state64(ss)->far;

@@ -1,0 +1,119 @@
+From: port_ios lavender
+Subject: [PATCH 0370] lavender: profile GPU blit fence waits
+
+--- a/bsd/dev/lavender_gpu.c
++++ b/bsd/dev/lavender_gpu.c
+@@ -1032,16 +1032,30 @@
+ static int ring_wait_polls = 300;
+ 
+ /* Publish the packets and wait for the CP read pointer to catch up. */
++struct lav_submit_profile {
++	uint64_t wptr_time;
++	uint64_t rptr_time;
++	uint64_t fence_sleep;
++	unsigned rptr_polls;
++};
++
+ static int
+-ring_submit(const char *what)
++ring_submit_timed(const char *what, struct lav_submit_profile *profile)
+ {
+ 	uint32_t rptr = 0;
+ 
+ 	flush_dcache64((addr64_t)ring_pa, RING_BYTES, TRUE);
++	if (profile != NULL) {
++		profile->wptr_time = mach_absolute_time();
++	}
+ 	wr(gpu, A5_CP_RB_WPTR, ring_wptr);
+ 	for (int i = 0; i < ring_wait_polls; i++) {
+ 		rptr = rd(gpu, A5_CP_RB_RPTR);
+ 		if (rptr == ring_wptr) {
++			if (profile != NULL) {
++				profile->rptr_time = mach_absolute_time();
++				profile->rptr_polls = i + 1;
++			}
+ 			printf("LAVGPU: %s consumed: RPTR %u WPTR %u after %d ms\n",
+ 			    what, rptr, ring_wptr, i * 10);
+ 			return 0;
+@@ -1052,6 +1066,12 @@
+ 	    "%08x AHB_ERR %08x\n", what, rptr, ring_wptr, rd(gpu, A5_RBBM_STATUS),
+ 	    rd(gpu, A5_RBBM_INT_0_STATUS), rd(gpu, A5_RBBM_AHB_ERR_STATUS));
+ 	return -1;
++}
++
++static int
++ring_submit(const char *what)
++{
++	return ring_submit_timed(what, NULL);
+ }
+ 
+ static void
+@@ -2753,6 +2773,17 @@
+ 
+ static int lav_svc_ready;
+ static uint32_t lav_svc_seq;
++static uint32_t lav_fence_profile;
++static unsigned lav_fence_samples;
++
++static unsigned long long
++lav_time_us(uint64_t ticks)
++{
++	uint64_t ns;
++
++	absolutetime_to_nanoseconds(ticks, &ns);
++	return (unsigned long long)(ns / 1000);
++}
+ 
+ int
+ lavender_gpu_service_ready(void)
+@@ -2772,6 +2803,11 @@
+ 		return 0;
+ 	}
+ 	seq = ++lav_svc_seq;
++	struct lav_submit_profile sample = {};
++	/* The Adreno copy encoder starts with the UCHE invalidate packet. */
++	struct lav_submit_profile *profile = lav_fence_profile &&
++	    dw[0] == 0x480e9185 && lav_fence_samples++ < 128 ? &sample : NULL;
++	uint64_t begin = profile != NULL ? mach_absolute_time() : 0;
+ 	ring_wait_polls = 1500;				/* 15 s for a service stream */
+ 	for (uint32_t i = 0; i < count; i++) {
+ 		ring_put(dw[i]);
+@@ -2791,16 +2827,29 @@
+ 	ring_pkt7(CP_WAIT_FOR_IDLE, 0);
+ 	*f = 0;
+ 	flush_dcache64((addr64_t)(rptr_pa + 0xe00), 64, TRUE);
+-	if (ring_submit("service stream") != 0) {
++	if (ring_submit_timed("service stream", profile) != 0) {
+ 		*status = EIO;
+ 		return 0;
+ 	}
+ 	for (int i = 0; i < 10000; i++) {
+ 		flush_dcache64((addr64_t)(rptr_pa + 0xe00), 64, TRUE);
+ 		if (*f == seq) {
++			if (profile != NULL) {
++				uint64_t fence = mach_absolute_time();
++
++				printf("LAVGPU: fence profile seq %u words %u prepare %llu us RPTR %llu us fence %llu us total %llu us rptr polls %u fence polls %d fence sleep %llu us\n",
++				    seq, count, lav_time_us(profile->wptr_time - begin),
++				    lav_time_us(profile->rptr_time - profile->wptr_time),
++				    lav_time_us(fence - profile->rptr_time), lav_time_us(fence - begin),
++				    profile->rptr_polls, i + 1, lav_time_us(profile->fence_sleep));
++			}
+ 			return seq;
+ 		}
++		uint64_t wait_start = profile != NULL ? mach_absolute_time() : 0;
+ 		lav_wait_fast(i, 1);
++		if (profile != NULL) {
++			profile->fence_sleep += mach_absolute_time() - wait_start;
++		}
+ 	}
+ 	{
+ 		vm_offset_t cbf = smmu_va + 0x8000u;
+@@ -2815,6 +2864,7 @@
+ static void
+ lav_service_start(int selftest)
+ {
++	PE_parse_boot_argn("lavfenceprof", &lav_fence_profile, sizeof(lav_fence_profile));
+ 	if (ring_va == 0 || ring_pa == 0 || fence_pa == 0 || !gx_on) {
+ 		printf("LAVGPU: service: the CP is not running, not starting\n");
+ 		return;

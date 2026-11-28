@@ -1,0 +1,44 @@
+diff --git a/bsd/dev/lavender_gpu.c b/bsd/dev/lavender_gpu.c
+index 5f6d79f..247d272 100644
+--- a/bsd/dev/lavender_gpu.c
++++ b/bsd/dev/lavender_gpu.c
+@@ -2092,6 +2092,7 @@ step21_draw(void)
+ 		return;
+ 	}
+ 	ring_pkt7(CP_WAIT_FOR_IDLE, 0);
++	ring_reg(0x0cc7u, 0x10000000u);				/* RB_CCU_CNTL: sysmem (Mesa a5xx) */
+ 	ring_reg(0xe140u, 1u << 17);				/* RB_CNTL: BYPASS */
+ 	if (draw_mark("rbcntl")) {
+ 		return;
+@@ -2297,8 +2298,8 @@ step21_draw(void)
+ 	wr(gpu, 0x0cd2u * 4, 1);
+ 	wr(gpu, 0x0cd3u * 4, 0);
+ 	for (int var = 0; var < 4; var++) {
+-		static const uint32_t rc_var[4] = { 0, 0x8, 0, 0 };
+-		static const uint32_t sc_var[4] = { 0, 0x8, 0x8, 0 };
++		static const uint32_t rc_var[4] = { 0x8, 0, 0x8, 0 };
++		static const uint32_t sc_var[4] = { 0x8, 0x8, 0, 0 };
+ 		static const uint32_t ccu_var[4] = { 0x08000000u, 0x08000000u, 0x08000000u, 0x04000000u };
+ 		in_ok = in_n = out_ok = out_n = 0;
+ 		first_bad = 0xffffffffu;
+@@ -2314,8 +2315,6 @@ step21_draw(void)
+ 		for (int c = 0; c < 4; c++) {
+ 			pc0[c] = rd(gpu, (0x0440u + 2 * c) * 4);
+ 		}
+-		ring_pkt7(CP_WAIT_FOR_IDLE, 0);
+-		ring_reg(0x0cc7u, ccu_var[var]);				/* RB_CCU_CNTL */
+ 		ring_reg(0xe141u, rc_var[var]);					/* RB_RENDER_CNTL */
+ 		ring_reg(0xe0a0u, sc_var[var]);					/* GRAS_SC_CNTL */
+ 		ring_pkt7(0x38u, 3);					/* CP_DRAW_INDX_OFFSET */
+@@ -2331,6 +2330,11 @@ step21_draw(void)
+ 		ring_put((uint32_t)(fence_pa + 0x100));
+ 		ring_put((uint32_t)((fence_pa + 0x100) >> 32));
+ 		ring_put(0x9abcu);
++		ring_pkt7(CP_EVENT_WRITE, 4);
++		ring_put(0x1cu | (1u << 30));				/* PC_CCU_FLUSH_DEPTH_TS */
++		ring_put((uint32_t)(fence_pa + 0x140));
++		ring_put((uint32_t)((fence_pa + 0x140) >> 32));
++		ring_put(0x9abdu);
+ 		ring_pkt7(CP_WAIT_FOR_IDLE, 0);
+ 		ring_pkt4(R_UCHE_INVALIDATE_MIN, 5);
+ 		ring_put(0);

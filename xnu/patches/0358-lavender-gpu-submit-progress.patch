@@ -1,0 +1,97 @@
+--- a/bsd/dev/lavender_gpu.c
++++ b/bsd/dev/lavender_gpu.c
+@@ -1012,17 +1012,40 @@
+  */
+ static int ring_wait_polls = 300;
+ 
++/* Read from the panic path without locks or GPU MMIO. High word: stream number.
++ * Low word: 1 accepted, 2 WPTR written, 3 RPTR caught up, 4 fence observed. */
++static uint64_t lav_submit_progress;
++uint64_t lavender_gpu_last_progress(void);
++
++uint64_t
++lavender_gpu_last_progress(void)
++{
++	return __atomic_load_n(&lav_submit_progress, __ATOMIC_RELAXED);
++}
++
++static inline void
++lav_mark_submit(uint32_t seq, uint32_t stage)
++{
++	__atomic_store_n(&lav_submit_progress, ((uint64_t)seq << 32) | stage, __ATOMIC_RELAXED);
++}
++
+ /* Publish the packets and wait for the CP read pointer to catch up. */
+ static int
+-ring_submit(const char *what)
++ring_submit_trace(const char *what, uint32_t seq)
+ {
+ 	uint32_t rptr = 0;
+ 
+ 	flush_dcache64((addr64_t)ring_pa, RING_BYTES, TRUE);
+ 	wr(gpu, A5_CP_RB_WPTR, ring_wptr);
++	if (seq) {
++		lav_mark_submit(seq, 2);
++	}
+ 	for (int i = 0; i < ring_wait_polls; i++) {
+ 		rptr = rd(gpu, A5_CP_RB_RPTR);
+ 		if (rptr == ring_wptr) {
++			if (seq) {
++				lav_mark_submit(seq, 3);
++			}
+ 			printf("LAVGPU: %s consumed: RPTR %u WPTR %u after %d ms\n",
+ 			    what, rptr, ring_wptr, i * 10);
+ 			return 0;
+@@ -1033,6 +1056,12 @@
+ 	    "%08x AHB_ERR %08x\n", what, rptr, ring_wptr, rd(gpu, A5_RBBM_STATUS),
+ 	    rd(gpu, A5_RBBM_INT_0_STATUS), rd(gpu, A5_RBBM_AHB_ERR_STATUS));
+ 	return -1;
++}
++
++static int
++ring_submit(const char *what)
++{
++	return ring_submit_trace(what, 0);
+ }
+ 
+ static void
+@@ -2728,6 +2757,7 @@
+ 		return 0;
+ 	}
+ 	seq = ++lav_svc_seq;
++	lav_mark_submit(seq, 1);
+ 	ring_wait_polls = 1500;				/* 15 s for a service stream */
+ 	for (uint32_t i = 0; i < count; i++) {
+ 		ring_put(dw[i]);
+@@ -2747,13 +2777,14 @@
+ 	ring_pkt7(CP_WAIT_FOR_IDLE, 0);
+ 	*f = 0;
+ 	flush_dcache64((addr64_t)(rptr_pa + 0xe00), 64, TRUE);
+-	if (ring_submit("service stream") != 0) {
++	if (ring_submit_trace("service stream", seq) != 0) {
+ 		*status = EIO;
+ 		return 0;
+ 	}
+ 	for (int i = 0; i < 10000; i++) {
+ 		flush_dcache64((addr64_t)(rptr_pa + 0xe00), 64, TRUE);
+ 		if (*f == seq) {
++			lav_mark_submit(seq, 4);
+ 			return seq;
+ 		}
+ 		lav_wait(1);
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -230,6 +230,13 @@
+ 	}
+ #endif
+ 	early_panicking = 1;
++#if defined(ARM64_BOARD_CONFIG_LAVENDER) || defined(LAVENDER)
++	extern uint64_t lavender_gpu_last_progress(void);
++	uint64_t gpu_progress = lavender_gpu_last_progress();
++	sweet_early_string("\nGPU stream/stage: ");
++	sweet_panic_hex(gpu_progress >> 32);
++	sweet_panic_hex((uint32_t)gpu_progress);
++#endif
+ 	sweet_early_string("\nSWEET EARLY PANIC: ");
+ 	va_list copy;
+ 	va_copy(copy, *args);

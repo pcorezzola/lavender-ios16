@@ -1,0 +1,19 @@
+From: port_ios lavender
+Subject: [PATCH 0363] lavender gpu: dump the SMMU fault registers when a service stream is not consumed
+
+---
+diff --git a/bsd/dev/lavender_gpu.c b/bsd/dev/lavender_gpu.c
+--- a/bsd/dev/lavender_gpu.c
++++ b/bsd/dev/lavender_gpu.c
+@@ -2750,6 +2750,11 @@
+ 			return seq;
+ 		}
+ 		lav_wait_fast(i, 1);
+ 	}
++	{
++		vm_offset_t cbf = smmu_va + 0x8000u;
++		printf("LAVGPU: SMMU fault: GFSR %08x CB4 FSR %08x FAR %08x%08x FSYNR0 %08x SCTLR %08x\n", rd(smmu_va, 0x48),
++		    rd(cbf, 0x58), rd(cbf, 0x64), rd(cbf, 0x60), rd(cbf, 0x68), rd(cbf, 0x00));
++	}
+ 	printf("LAVGPU: service stream %u: the fence was not written (%08x)\n", seq, *f);
+ 	*status = ETIMEDOUT;

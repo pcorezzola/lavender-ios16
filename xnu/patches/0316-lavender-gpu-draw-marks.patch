@@ -1,0 +1,160 @@
+diff --git a/bsd/dev/lavender_gpu.c b/bsd/dev/lavender_gpu.c
+index f9beec9..1406716 100644
+--- a/bsd/dev/lavender_gpu.c
++++ b/bsd/dev/lavender_gpu.c
+@@ -1924,6 +1924,33 @@ chan_ok(uint32_t got, uint32_t want)
+ 	return 1;
+ }
+ 
++/* Queue a fence write and wait for it: proves the ME executed everything before it. */
++static int
++draw_mark(const char *what)
++{
++	static uint32_t seq;
++	volatile uint32_t *m = (volatile uint32_t *)(rptr_va + 0x180);
++	uint32_t want = 0xd0000000u | ++seq;
++
++	*m = 0;
++	flush_dcache64((addr64_t)(fence_pa + 0x80), 64, TRUE);
++	ring_pkt7(CP_MEM_WRITE, 3);
++	ring_put((uint32_t)(fence_pa + 0x80));
++	ring_put((uint32_t)((fence_pa + 0x80) >> 32));
++	ring_put(want);
++	ring_submit(what);
++	for (int k = 0; k < 40; k++) {
++		flush_dcache64((addr64_t)(fence_pa + 0x80), 64, TRUE);
++		if (*m == want) {
++			printf("LAVGPU: mark %s ok\n", what);
++			return 0;
++		}
++		lav_wait(5);
++	}
++	printf("LAVGPU: the ME is stuck BEFORE mark %s (fence %08x)\n", what, *m);
++	return -1;
++}
++
+ static void
+ step21_draw(void)
+ {
+@@ -1987,6 +2014,9 @@ step21_draw(void)
+ 	/* fd5_emit_restore (the non-default part) */
+ 	ring_pkt7(CP_SET_RENDER_MODE, 1);
+ 	ring_put(1);						/* BYPASS */
++	if (draw_mark("bypass")) {
++		return;
++	}
+ 	ring_pkt4(R_UCHE_INVALIDATE_MIN, 5);
+ 	ring_put(0);
+ 	ring_put(0);
+@@ -1995,6 +2025,9 @@ step21_draw(void)
+ 	ring_put(0x12);
+ 	ring_pkt7(CP_WAIT_FOR_IDLE, 0);
+ 	ring_reg(R_HLSQ_UPDATE_CNTL, 0xfffff);
++	if (draw_mark("ucheflush")) {
++		return;
++	}
+ 	ring_reg(0xe38cu, 0xffffffffu);				/* PC_RESTART_INDEX */
+ 	ring_reg(0xe388u, 0x12);				/* PC_RASTER_CNTL */
+ 	ring_pkt4(0xe091u, 2);					/* GRAS_SU_POINT_MINMAX, _SIZE */
+@@ -2020,19 +2053,30 @@ step21_draw(void)
+ 	ring_reg(0xe0a1u, 0);					/* GRAS_SC_BIN_CNTL */
+ 	ring_reg(0xe2a0u, 0xff);				/* VPC_FS_PRIMITIVEID_CNTL */
+ 	ring_reg(0xe21cu, 0);					/* RB_CLEAR_CNTL */
+-	if (ring_submit("restore") != 0) {
+-		printf("LAVGPU: the CP stalled in the restore chunk\n");
++	if (draw_mark("restore")) {
+ 		return;
+ 	}
+ 	/* emit_sysmem_prep */
+ 	ring_pkt7(0x1du, 1);					/* CP_SKIP_IB2_ENABLE_GLOBAL */
++	if (draw_mark("skipib2")) {
++		return;
++	}
+ 	ring_put(0);
+ 	ring_pkt7(CP_EVENT_WRITE, 1);
+ 	ring_put(0x19);						/* PC_CCU_INVALIDATE_COLOR */
++	if (draw_mark("ccuinv")) {
++		return;
++	}
+ 	ring_reg(0xe3b0u, 1);					/* PC_POWER_CNTL: sp cores - 1 */
+ 	ring_reg(0xe4f0u, 1);					/* VFD_POWER_CNTL */
++	if (draw_mark("power")) {
++		return;
++	}
+ 	ring_pkt7(CP_WAIT_FOR_IDLE, 0);
+ 	ring_reg(0xe140u, 1u << 17);				/* RB_CNTL: BYPASS */
++	if (draw_mark("rbcntl")) {
++		return;
++	}
+ 	ring_pkt4(0xe0eau, 2);					/* GRAS_SC_WINDOW_SCISSOR_TL, BR */
+ 	ring_put(0);
+ 	ring_put((D_W - 1) | ((D_H - 1) << 16));
+@@ -2040,11 +2084,16 @@ step21_draw(void)
+ 	ring_put(0);
+ 	ring_put((D_W - 1) | ((D_H - 1) << 16));
+ 	ring_reg(0xe1d0u, 0);					/* RB_WINDOW_OFFSET */
++	if (draw_mark("winoff")) {
++		return;
++	}
+ 	ring_reg(0xe2a2u, 0);					/* VPC_SO_OVERRIDE */
++	if (draw_mark("soover")) {
++		return;
++	}
+ 	ring_pkt7(0x64u, 1);					/* CP_SET_VISIBILITY_OVERRIDE */
+ 	ring_put(1);
+-	if (ring_submit("prep") != 0) {
+-		printf("LAVGPU: the CP stalled in the prep chunk\n");
++	if (draw_mark("prep")) {
+ 		return;
+ 	}
+ 	/* emit_mrt (one target, linear RGBA8) and emit_msaa (one sample) */
+@@ -2064,8 +2113,7 @@ step21_draw(void)
+ 	ring_pkt4(0xe0a2u, 2);					/* GRAS_SC_RAS_MSAA_CNTL, _DEST_ */
+ 	ring_put(0);
+ 	ring_put(4);
+-	if (ring_submit("mrt") != 0) {
+-		printf("LAVGPU: the CP stalled in the mrt chunk\n");
++	if (draw_mark("mrt")) {
+ 		return;
+ 	}
+ 	/* fd5_emit_state: render targets, blend, depth/stencil, viewport, scissor */
+@@ -2105,8 +2153,7 @@ step21_draw(void)
+ 	ring_reg(0xe150u, (3u << 3) | (0xfu << 7));		/* RB_MRT_CONTROL(0): ROP_COPY, all comps */
+ 	ring_reg(0xe151u, 0x10001u);				/* RB_MRT_BLEND_CONTROL(0): src ONE, dst ZERO */
+ 	ring_reg(0xe5c9u, 0x100);				/* SP_BLEND_CNTL */
+-	if (ring_submit("state") != 0) {
+-		printf("LAVGPU: the CP stalled in the state chunk\n");
++	if (draw_mark("state")) {
+ 		return;
+ 	}
+ 	ring_reg(0xe1a9u, 0xffff0100u);				/* RB_BLEND_CNTL: sample mask, independent */
+@@ -2148,8 +2195,7 @@ step21_draw(void)
+ 	ring_pkt4(0xe5acu, 2);					/* SP_VS_OBJ_START */
+ 	ring_put((uint32_t)vs_pa);
+ 	ring_put((uint32_t)(vs_pa >> 32));
+-	if (ring_submit("prog1") != 0) {
+-		printf("LAVGPU: the CP stalled in the prog1 chunk\n");
++	if (draw_mark("prog1")) {
+ 		return;
+ 	}
+ 	ring_pkt7(CP_LOAD_STATE4, 3);				/* VS into the SP */
+@@ -2197,8 +2243,7 @@ step21_draw(void)
+ 	ring_put((0xcu << 18) | (1u << 22) | (2u << 16));
+ 	ring_put((uint32_t)fs_pa);
+ 	ring_put((uint32_t)(fs_pa >> 32));
+-	if (ring_submit("prog2") != 0) {
+-		printf("LAVGPU: the CP stalled in the prog2 chunk\n");
++	if (draw_mark("prog2")) {
+ 		return;
+ 	}
+ 	ring_pkt4(0xe401u, 5);					/* VFD_CONTROL_1..5 */
+@@ -2223,8 +2268,7 @@ step21_draw(void)
+ 	ring_put(0);
+ 	ring_reg(0xe38cu, 0xffffffffu);				/* PC_RESTART_INDEX */
+ 	/* fd5_emit_render_cntl and the draw */
+-	if (ring_submit("vtx") != 0) {
+-		printf("LAVGPU: the CP stalled in the vtx chunk\n");
++	if (draw_mark("vtx")) {
+ 		return;
+ 	}
+ 	ring_reg(0xe141u, 0x8);					/* RB_RENDER_CNTL */

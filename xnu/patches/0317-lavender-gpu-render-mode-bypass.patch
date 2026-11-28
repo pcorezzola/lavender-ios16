@@ -1,0 +1,18 @@
+diff --git a/bsd/dev/lavender_gpu.c b/bsd/dev/lavender_gpu.c
+index 1406716..698b17b 100644
+--- a/bsd/dev/lavender_gpu.c
++++ b/bsd/dev/lavender_gpu.c
+@@ -2012,8 +2012,12 @@ step21_draw(void)
+ 
+ 	lav_announce("step 21: submit the first 3D draw");
+ 	/* fd5_emit_restore (the non-default part) */
+-	ring_pkt7(CP_SET_RENDER_MODE, 1);
++	ring_pkt7(CP_SET_RENDER_MODE, 5);
+ 	ring_put(1);						/* BYPASS */
++	ring_put(0);
++	ring_put(0);
++	ring_put(0);
++	ring_put(0);
+ 	if (draw_mark("bypass")) {
+ 		return;
+ 	}

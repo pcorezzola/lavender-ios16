@@ -1,0 +1,109 @@
+--- a/bsd/dev/lavender_gpu.c
++++ b/bsd/dev/lavender_gpu.c
+@@ -880,7 +880,8 @@
+ #define A5_CP_PFP_ME_CNTL       (0x0832u * 4)
+ #define A5_CP_PFP_INSTR_BASE    (0x0835u * 4)
+ #define A5_CP_ME_INSTR_BASE     (0x0838u * 4)
+-#define RING_BYTES              0x8000u
++#define RING_BYTES              0x20000u        /* 0367: 128 KB: a batch of draws is one stream of up to 16384 dwords */
++#define RING_BUFSZ              14u             /* CP_RB_CNTL.RB_BUFSZ = log2(RING_BYTES / 8) */
+ #define UCODE_BYTES             0x5000u
+ 
+ static uint64_t ring_pa, rptr_pa, fence_pa, ucode_pm4_pa, ucode_pfp_pa;
+@@ -939,7 +940,7 @@
+ 	wr(gpu, A5_CP_ME_INSTR_BASE, (uint32_t)pm4_pa);
+ 	wr(gpu, A5_CP_ME_INSTR_BASE + 4, (uint32_t)(pm4_pa >> 32));
+ 	/* ring: BUFSZ = log2(bytes/8) in bits 5:0, BLKSZ = log2(32/8) in bits 13:8 */
+-	wr(gpu, A5_CP_RB_CNTL, 12u | (2u << 8));
++	wr(gpu, A5_CP_RB_CNTL, RING_BUFSZ | (2u << 8));
+ 	wr(gpu, A5_CP_RB_BASE, (uint32_t)ring_pa);
+ 	wr(gpu, A5_CP_RB_BASE + 4, (uint32_t)(ring_pa >> 32));
+ 	wr(gpu, A5_CP_RB_RPTR_ADDR, (uint32_t)rptr_pa);
+@@ -1032,18 +1033,46 @@
+ static int ring_wait_polls = 300;
+ 
+ /* Publish the packets and wait for the CP read pointer to catch up. */
++/*
++ * 0367: only what was written since the last submit is flushed (the ring is 128 KB now and the service submits
++ * hundreds of times a frame), and the "consumed" line is printed only for the first submits or when the wait was
++ * long: a console line per submit cost more than the GPU's work.
++ */
++static uint32_t ring_flushed;
++static uint32_t ring_nsubmit;
++
++static void
++ring_flush_written(void)
++{
++	uint32_t from = (ring_flushed * 4u) & ~63u, to = (ring_wptr * 4u + 63u) & ~63u;
++
++	if (to > RING_BYTES) {
++		to = RING_BYTES;
++	}
++	if (ring_wptr >= ring_flushed) {
++		flush_dcache64((addr64_t)(ring_pa + from), to - from, TRUE);
++	} else {
++		flush_dcache64((addr64_t)(ring_pa + from), RING_BYTES - from, TRUE);
++		flush_dcache64((addr64_t)ring_pa, to, TRUE);
++	}
++	ring_flushed = ring_wptr;
++}
++
+ static int
+ ring_submit(const char *what)
+ {
+ 	uint32_t rptr = 0;
+ 
+-	flush_dcache64((addr64_t)ring_pa, RING_BYTES, TRUE);
++	ring_flush_written();
+ 	wr(gpu, A5_CP_RB_WPTR, ring_wptr);
++	ring_nsubmit++;
+ 	for (int i = 0; i < ring_wait_polls; i++) {
+ 		rptr = rd(gpu, A5_CP_RB_RPTR);
+ 		if (rptr == ring_wptr) {
+-			printf("LAVGPU: %s consumed: RPTR %u WPTR %u after %d ms\n",
+-			    what, rptr, ring_wptr, i * 10);
++			if (ring_nsubmit <= 32 || i >= 600) {
++				printf("LAVGPU: %s consumed: RPTR %u WPTR %u after %d polls\n",
++				    what, rptr, ring_wptr, i);
++			}
+ 			return 0;
+ 		}
+ 		lav_wait_fast(i, 10);
+@@ -1101,7 +1130,7 @@
+ 		}
+ 	}
+ 	wr(gpu, A5_RBBM_INT_0_MASK, 0);
+-	wr(gpu, A5_CP_RB_CNTL, 12u | (2u << 8) | RB_NO_UPDATE);
++	wr(gpu, A5_CP_RB_CNTL, RING_BUFSZ | (2u << 8) | RB_NO_UPDATE);
+ 	printf("LAVGPU: RB_CNTL %08x CP_ADDR_MODE %08x\n", rd(gpu, A5_CP_RB_CNTL),
+ 	    rd(gpu, A5_CP_ADDR_MODE_CNTL));
+ 
+@@ -1198,7 +1227,7 @@
+ 	wr(gpu, A5_CP_RB_BASE + 4, (uint32_t)(ring_pa >> 32));
+ 	wr(gpu, A5_CP_RB_RPTR_ADDR, (uint32_t)rptr_pa);
+ 	wr(gpu, A5_CP_RB_RPTR_ADDR + 4, (uint32_t)(rptr_pa >> 32));
+-	wr(gpu, A5_CP_RB_CNTL, 12u | (2u << 8) | RB_NO_UPDATE);
++	wr(gpu, A5_CP_RB_CNTL, RING_BUFSZ | (2u << 8) | RB_NO_UPDATE);
+ 	wr(gpu, A5_SECVID_TSB_CNTL, 0);
+ 	wr(gpu, A5_SECVID_TSB_BASE_LO, 0);
+ 	wr(gpu, A5_SECVID_TSB_BASE_LO + 4, 0);
+@@ -2767,7 +2796,7 @@
+ 	uint32_t seq;
+ 
+ 	*status = 0;
+-	if (!lav_svc_ready || count == 0 || count > 4096) {
++	if (!lav_svc_ready || count == 0 || count > 16384) {
+ 		*status = EINVAL;
+ 		return 0;
+ 	}
+--- a/iokit/Kernel/arm/LavenderGPU.cpp
++++ b/iokit/Kernel/arm/LavenderGPU.cpp
+@@ -51,7 +51,7 @@
+ 
+ #define LAV_BUFFERS     256
+ #define LAV_BUFFER_MAX  (16ull << 20)
+-#define LAV_SUBMIT_MAX  16384           /* bytes of PM4 words in one stream */
++#define LAV_SUBMIT_MAX  65536           /* bytes of PM4 words in one stream (0367: a batch of draws) */
+ 
+ struct lav_info {
+ 	uint32_t version, ready, submits, last_fence;

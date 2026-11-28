@@ -1,0 +1,54 @@
+From: port_ios lavender
+Subject: [PATCH 0359] lavender: GPU service polls every 50 us for the first 30 ms instead of sleeping 10 ms
+
+Measured with the LavenderMetal plug-in (2026-11-25): every submit of the service cost ~11 ms whatever it
+drew (a 44 kpixel draw took as long as a 375 kpixel one). ring_submit() slept 10 ms between polls of the CP
+read pointer and the fence loop 1 ms, so even a stream the GPU finished in microseconds returned after the
+first sleep. Backboardd's lock screen is ~80 submits per commit: ~1 s of pure sleeping.
+
+---
+diff --git a/bsd/dev/lavender_gpu.c b/bsd/dev/lavender_gpu.c
+--- a/bsd/dev/lavender_gpu.c
++++ b/bsd/dev/lavender_gpu.c
+@@ -1005,6 +1005,25 @@
+ 	ring_put(0x70000000u | (cnt & 0x3fff) | (pm4_parity(cnt) << 15) |
+ 	    ((opcode & 0x7f) << 16) | (pm4_parity(opcode) << 23));
+ }
++
++/*
++ * 0359: a wait between polls of the CP read pointer or of the fence. A stream usually takes a few ms, but
++ * the polls slept 10 ms (RPTR) and 1 ms (fence) each, so every service submit cost >= 10 ms whatever it drew:
++ * the first 600 polls (30 ms) now sleep 50 us, then the old interval.
++ */
++static void
++lav_wait_fast(unsigned i, unsigned slow_ms)
++{
++	if (i < 600) {
++		uint64_t deadline;
++
++		clock_interval_to_deadline(50, NSEC_PER_USEC, &deadline);
++		(void)assert_wait_deadline(&lav_chan, THREAD_UNINT, deadline);
++		thread_block(THREAD_CONTINUE_NULL);
++	} else {
++		lav_wait(slow_ms);
++	}
++}
+ 
+ /*
+  * 0356: the wait for the CP is 300 polls of 10 ms (3 s) by default; the service raises it, because a
+@@ -1020,6 +1020,6 @@
+ 			    what, rptr, ring_wptr, i * 10);
+ 			return 0;
+ 		}
+-		lav_wait(10);
++		lav_wait_fast(i, 10);
+ 	}
+ 	printf("LAVGPU: %s NOT consumed: RPTR %u WPTR %u, RBBM_STATUS %08x INT_0 "
+@@ -2750,6 +2750,6 @@
+ 			return seq;
+ 		}
+-		lav_wait(1);
++		lav_wait_fast(i, 1);
+ 	}
+ 	printf("LAVGPU: service stream %u: the fence was not written (%08x)\n", seq, *f);
+ 	*status = ETIMEDOUT;

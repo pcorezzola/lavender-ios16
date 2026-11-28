@@ -1,0 +1,36 @@
+diff --git a/bsd/dev/lavender_gpu.c b/bsd/dev/lavender_gpu.c
+index 581f6ef..5cb458b 100644
+--- a/bsd/dev/lavender_gpu.c
++++ b/bsd/dev/lavender_gpu.c
+@@ -2025,15 +2025,13 @@ step21_draw(int mode)
+ 	/* VS: the position is already in r0.xyzw; it also stores a marker word */
+ 	shader_store_tail(vs, 0, pa + 0x7000, 0xa5a50002u);
+ 	if (dbg) {
+-		fs[0] = 0x00082000u;				/* bary.f (ei)r0.x, 0, r2.x */
+-		fs[1] = 0x47328000u;
+-		fs[2] = 0x00082001u;				/* bary.f (ei)r0.y, 1, r2.x */
+-		fs[3] = 0x47328001u;
+-		shader_mov(&fs[4], 2, 0);
+-		shader_mov(&fs[6], 3, 0x3f800000u);
+-		fs[8] = 0;
+-		fs[9] = 0x10001500u;				/* (ss)(sy)(rpt5)nop */
+-		shader_store_tail(fs, 10, pa + 0x7040, 0xf5f50001u);
++		fs[0] = 0x00002000u;				/* bary.f (ei)r0.z, 0, r0.x : colour = (i, j, u, v) */
++		fs[1] = 0x47328002u;
++		fs[2] = 0x00002001u;				/* bary.f (ei)r0.w, 1, r0.x */
++		fs[3] = 0x47328003u;
++		fs[4] = 0;
++		fs[5] = 0x10001500u;				/* (ss)(sy)(rpt5)nop */
++		shader_store_tail(fs, 6, pa + 0x7040, 0xf5f50001u);
+ 	} else if (tex) {
+ 		uint32_t *tx = (uint32_t *)(va + 0x8000);
+ 
+@@ -2300,7 +2298,7 @@ step21_draw(int mode)
+ 	ring_put(0x880);
+ 	ring_put(63);
+ 	ring_put(0xfcfcfcfcu);
+-	ring_put(dbg ? 0xfcfcfc08u : vary ? 0xfcfcfc00u : 0xfcfcfcfcu);		/* HLSQ_CONTROL_3: IJ_PERSP_PIXEL = r0.x */
++	ring_put(dbg ? 0xfcfcfc00u : vary ? 0xfcfcfc00u : 0xfcfcfcfcu);		/* HLSQ_CONTROL_3: IJ_PERSP_PIXEL = r0.x */
+ 	ring_put(0xfcfcfcfcu);
+ 	ring_reg(0xe5c0u, 0x40002u | (1u << 2) | ((dbg ? 3u : 2u) << 10) | (vary ? 0x10000u : 0));	/* SP_FS_CTRL_REG0 */
+ 	ring_reg(R_HLSQ_UPDATE_CNTL, 0x20fffffu);

@@ -1,0 +1,33 @@
+diff --git a/bsd/dev/lavender_gpu.c b/bsd/dev/lavender_gpu.c
+index be74ebf..25e2b48 100644
+--- a/bsd/dev/lavender_gpu.c
++++ b/bsd/dev/lavender_gpu.c
+@@ -2011,14 +2011,14 @@ step21_draw(bool tex)
+ 	if (tex) {
+ 		uint32_t *tx = (uint32_t *)(va + 0x8000);
+ 
+-		/* 4x4 RGBA8 linear texture, pitch 64 bytes; texel(x,y) = ff | (x*0x40+0x10) | (y*0x40+0x10) | 77 */
++		/* 4x4 RGBA8 linear texture, pitch 256 bytes (64 texels, as fdl5 aligns); texel(x,y) = ff | (x*0x40+0x10) | (y*0x40+0x10) | 77 */
+ 		for (uint32_t y = 0; y < 4; y++) {
+ 			for (uint32_t x = 0; x < 4; x++) {
+-				tx[y * 16 + x] = 0xff000000u | ((x * 0x40 + 0x10) << 16) |
++				tx[y * 64 + x] = 0xff000000u | ((x * 0x40 + 0x10) << 16) |
+ 				    ((y * 0x40 + 0x10) << 8) | 0x77u;
+ 			}
+ 		}
+-		flush_dcache64((addr64_t)(pa + 0x8000), 0x100, TRUE);
++		flush_dcache64((addr64_t)(pa + 0x8000), 0x2000, TRUE);
+ 		/* FS: r1.xy = (0.625, 0.375); sam (f32)(xyzw)r0.x, r1.x, s#0, t#0; (sy)nop; store marker; end */
+ 		shader_mov(&fs[0], 4, 0x3f200000u);
+ 		shader_mov(&fs[2], 5, 0x3ec00000u);
+@@ -2306,8 +2306,8 @@ step21_draw(bool tex)
+ 		ring_put(0);
+ 		ring_put(0x30u << 22 | (1u << 7) | (2u << 10) | (3u << 13));	/* RGBA8_UNORM, swizzle xyzw */
+ 		ring_put(4u | (4u << 15));			/* 4x4 */
+-		ring_put((1u << 29) | (64u << 7));		/* 2D, pitch 64 */
+-		ring_put(0);
++		ring_put((1u << 29) | (256u << 7) | 2u);	/* 2D, pitch 256, PITCHALIGN log2(256/64) */
++		ring_put(2);					/* ARRAY_PITCH: 8 KB layer >> 12 */
+ 		ring_put((uint32_t)(pa + 0x8000));		/* BASE_LO */
+ 		ring_put((uint32_t)((pa + 0x8000) >> 32) | (1u << 17));	/* BASE_HI, DEPTH 1 */
+ 		for (int i = 0; i < 6; i++) {

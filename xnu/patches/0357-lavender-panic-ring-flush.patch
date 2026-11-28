@@ -1,0 +1,132 @@
+diff --git a/bsd/dev/santoni_sdhci.c b/bsd/dev/santoni_sdhci.c
+--- a/bsd/dev/santoni_sdhci.c
++++ b/bsd/dev/santoni_sdhci.c
+@@ -6079,6 +6079,45 @@
+ 	bzero(bounce, SDHCI_BLOCK);
+ 	memcpy(bounce, &h, sizeof(h));
+ 	return santoni_sdhci_write_log_blocks(base, 1, bounce);
++}
++
++static _Atomic uint64_t santoni_log_flushed_total;     /* 0357: what the flusher has written, for the panic flush */
++
++/*
++ * 0357: called from the early panic handler with every other CPU stopped or spinning. The flusher thread cannot run
++ * then, so the panic text (appended to the ring by the handler) and the last 64 KiB before it would stay in RAM. Write
++ * them with the PIO routine directly (no mutex: the one that may be held is the reason we are here), then the header.
++ */
++void santoni_log_panic_flush(void);
++
++void
++santoni_log_panic_flush(void)
++{
++	static uint8_t hdr[SDHCI_BLOCK];
++	uint64_t base = se.sys_first_block;
++	uint64_t total = os_atomic_load(&santoni_log_total, relaxed);
++	uint64_t done = os_atomic_load(&santoni_log_flushed_total, relaxed);
++	uint64_t pos = (total > done + 65536) ? total - 65536 : done;
++	struct santoni_log_header h = { .magic = "SANTONILOG1", .version = 1, .size = SANTONI_LOG_SIZE, .total = total, .seq = 999999 };
++	int error = 0;
++
++	if (!se.log_ok || total == 0) {
++		return;
++	}
++	while (pos < total && !error) {
++		uint32_t off = (uint32_t)(pos % SANTONI_LOG_SIZE);
++		uint32_t blk = off / SDHCI_BLOCK;
++		uint64_t need = ((uint64_t)(off % SDHCI_BLOCK) + (total - pos) + SDHCI_BLOCK - 1) / SDHCI_BLOCK;
++		uint32_t n = (uint32_t)MIN(MIN(need, (uint64_t)(SANTONI_LOG_SIZE / SDHCI_BLOCK - blk)), (uint64_t)(BOUNCE_SIZE / SDHCI_BLOCK));
++
++		error = sdhci_write_pio((uint32_t)(base + 1 + blk), n, santoni_log_ring + (uint64_t)blk * SDHCI_BLOCK);
++		pos += (uint64_t)(blk + n) * SDHCI_BLOCK - off;
++	}
++	if (!error) {
++		bzero(hdr, SDHCI_BLOCK);
++		memcpy(hdr, &h, sizeof(h));
++		(void)sdhci_write_pio((uint32_t)base, 1, hdr);
++	}
+ }
+ 
+ static void
+@@ -6159,6 +6198,7 @@
+ 			    herr ? "failed" : "ok");
+ 		}
+ 		flushed = total;
++		os_atomic_store(&santoni_log_flushed_total, flushed, relaxed);
+ 	}
+ }
+ 
+diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -167,6 +167,56 @@
+ 	sweet_early_putc('\n');
+ }
+ 
++extern void santoni_log_append(const char *c, int size);   /* bsd/dev/santoni_sdhci.c */
++extern void santoni_log_panic_flush(void);
++
++/* 0357: the panic text goes to the screen and to the persistent ring */
++static void
++sweet_panic_putc(char c)
++{
++	sweet_early_putc(c);
++	santoni_log_append(&c, 1);
++}
++
++static void
++sweet_panic_hex(unsigned long long v)
++{
++	static const char digits[] = "0123456789abcdef";
++
++	sweet_panic_putc('0');
++	sweet_panic_putc('x');
++	for (int sh = 60; sh >= 0; sh -= 4) {
++		sweet_panic_putc(digits[(v >> sh) & 0xf]);
++	}
++	sweet_panic_putc(' ');
++}
++
++/* 0357: where this CPU was: the return addresses up the frame-pointer chain (kernel text, symbolised on the Mac) */
++static void
++sweet_panic_backtrace(void)
++{
++	uintptr_t * fp = (uintptr_t *)__builtin_frame_address(0);
++	const char * title = "SWEET PANIC BT: ";
++
++	while (*title) {
++		sweet_panic_putc(*title++);
++	}
++	for (int i = 0; i < 24; i++) {
++		uintptr_t next;
++
++		if (((uintptr_t)fp & 0xf) != 0 || ((uintptr_t)fp >> 48) != 0xffff) {
++			break;
++		}
++		sweet_panic_hex((unsigned long long)fp[1]);
++		next = fp[0];
++		if (next <= (uintptr_t)fp || next - (uintptr_t)fp > 0x10000) {
++			break;
++		}
++		fp = (uintptr_t *)next;
++	}
++	sweet_panic_putc('\n');
++}
++
+ void
+ sweet_early_panic(const char *fmt, va_list *args)
+ {
+@@ -183,10 +233,12 @@
+ 	sweet_early_string("\nSWEET EARLY PANIC: ");
+ 	va_list copy;
+ 	va_copy(copy, *args);
+-	_doprnt(fmt, &copy, sweet_early_putc, 16);
++	_doprnt(fmt, &copy, sweet_panic_putc, 16);
+ 	va_end(copy);
+-	sweet_early_putc('\n');
++	sweet_panic_putc('\n');
++	sweet_panic_backtrace();
+ 	__asm__ volatile("dsb sy" ::: "memory");
++	santoni_log_panic_flush();
+ #if defined(ARM64_BOARD_CONFIG_SANTONI) || defined(SANTONI) || defined(ARM64_BOARD_CONFIG_LAVENDER) || defined(LAVENDER)
+ 	for (;;) {
+ 		__asm__ volatile("wfe");

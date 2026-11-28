@@ -1,0 +1,15 @@
+diff --git a/bsd/dev/lavender_gpu.c b/bsd/dev/lavender_gpu.c
+index 247d272..730bb75 100644
+--- a/bsd/dev/lavender_gpu.c
++++ b/bsd/dev/lavender_gpu.c
+@@ -2119,8 +2119,8 @@ step21_draw(void)
+ 	/* emit_mrt (one target, linear RGBA8) and emit_msaa (one sample) */
+ 	ring_pkt4(0xe152u, 5);					/* RB_MRT_BUF_INFO(0) .. BASE */
+ 	ring_put(0x30);
+-	ring_put(D_PITCH);
+-	ring_put(D_BYTES);
++	ring_put(D_PITCH >> 6);					/* PITCH and ARRAY_PITCH are shr 6 */
++	ring_put(D_BYTES >> 6);
+ 	ring_put((uint32_t)rt_pa);
+ 	ring_put((uint32_t)(rt_pa >> 32));
+ 	ring_reg(0xe5d3u, 0x30);				/* SP_FS_MRT_REG(0) */

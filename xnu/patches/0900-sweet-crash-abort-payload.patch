@@ -1,0 +1,36 @@
+diff --git a/bsd/kern/kern_exit.c b/bsd/kern/kern_exit.c
+index 1161432..24bfe23 100644
+--- a/bsd/kern/kern_exit.c
++++ b/bsd/kern/kern_exit.c
+@@ -1339,6 +1339,31 @@ abort_with_payload_internal(proc_t p,
+ 	os_reason_t exit_reason = OS_REASON_NULL;
+ 	kern_return_t kr = KERN_SUCCESS;
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	/* SWEET: print the abort message here, before the signal is queued.
++	 * On this port the reason attached to the SIGABRT often never reaches
++	 * proc_prepareexit (the CRASH line then shows the generic
++	 * ns 2/SIGABRT reason), so the userland crash text would be lost.
++	 * The payload is the abort_message() string, e.g. "terminating with
++	 * uncaught exception of type NSException: ...". This covers both
++	 * abort_with_payload() and os_fault_with_payload(). */
++	{
++		char msg[288];
++		uint32_t plen = payload_size;
++
++		if (plen > sizeof(msg) - 1) {
++			plen = sizeof(msg) - 1;
++		}
++		if (payload != USER_ADDR_NULL && plen != 0 &&
++		    copyin(payload, msg, plen) == 0) {
++			msg[plen] = '\0';
++			printf("SWEET ABORT %s[%d] ns %u code 0x%llx: %s\n",
++			    p->p_comm, proc_getpid(p), reason_namespace, reason_code,
++			    msg);
++		}
++	}
++#endif
++
+ 	if (internal_flags & OS_REASON_IFLAG_USER_FAULT) {
+ 		uint32_t old_value = atomic_load_explicit(&p->p_user_faults,
+ 		    memory_order_relaxed);

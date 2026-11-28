@@ -1,0 +1,45 @@
+diff --git a/bsd/dev/lavender_gpu.c b/bsd/dev/lavender_gpu.c
+index 6fb91f5..5f6d79f 100644
+--- a/bsd/dev/lavender_gpu.c
++++ b/bsd/dev/lavender_gpu.c
+@@ -1984,6 +1984,7 @@ step21_draw(void)
+ 	uint32_t *vs, *fs, *vb;
+ 	volatile uint32_t *rt;
+ 	uint32_t in_ok = 0, in_n = 0, out_ok = 0, out_n = 0, first_bad = 0xffffffffu;
++	uint32_t pc0[4] = { 0, 0, 0, 0 };
+ 	const uint32_t hbb = 1;	/* highest bank bit 14 - 13, as the 2D steps use */
+ 
+ 	if (ring_va == 0 || ring_pa == 0) {
+@@ -2289,6 +2290,12 @@ step21_draw(void)
+ 	if (draw_mark("vtx")) {
+ 		return;
+ 	}
++	/* RB perf counters: 0 TOTAL_PASS, 1 C_WRITE, 2 STALL_CYCLES_CCU, 3 BUSY_CYCLES */
++	wr(gpu, 0x0464u * 4, 1);
++	wr(gpu, 0x0cd0u * 4, 17);
++	wr(gpu, 0x0cd1u * 4, 16);
++	wr(gpu, 0x0cd2u * 4, 1);
++	wr(gpu, 0x0cd3u * 4, 0);
+ 	for (int var = 0; var < 4; var++) {
+ 		static const uint32_t rc_var[4] = { 0, 0x8, 0, 0 };
+ 		static const uint32_t sc_var[4] = { 0, 0x8, 0x8, 0 };
+@@ -2304,6 +2311,9 @@ step21_draw(void)
+ 		*(volatile uint32_t *)(va + 0x7000) = 0;
+ 		*(volatile uint32_t *)(va + 0x7040) = 0;
+ 		flush_dcache64((addr64_t)(pa + 0x7000), 0x80, TRUE);
++		for (int c = 0; c < 4; c++) {
++			pc0[c] = rd(gpu, (0x0440u + 2 * c) * 4);
++		}
+ 		ring_pkt7(CP_WAIT_FOR_IDLE, 0);
+ 		ring_reg(0x0cc7u, ccu_var[var]);				/* RB_CCU_CNTL */
+ 		ring_reg(0xe141u, rc_var[var]);					/* RB_RENDER_CNTL */
+@@ -2365,6 +2375,9 @@ step21_draw(void)
+ 		    "RBBM_STATUS %08x\n", in_ok, in_n, out_ok, out_n,
+ 		    (in_ok == in_n && out_ok == out_n) ? " (ALL CORRECT)" : "", rd(gpu, A5_RBBM_STATUS));
+ 		flush_dcache64((addr64_t)(pa + 0x7000), 0x80, TRUE);
++		printf("LAVGPU: RB counters (delta): TOTAL_PASS %u C_WRITE %u STALL_CCU %u BUSY %u\n",
++		    rd(gpu, 0x0440u * 4) - pc0[0], rd(gpu, 0x0442u * 4) - pc0[1],
++		    rd(gpu, 0x0444u * 4) - pc0[2], rd(gpu, 0x0446u * 4) - pc0[3]);
+ 		printf("LAVGPU: shader markers: VS %08x FS %08x (want a5a50002 / f5f50001)\n",
+ 		    *(volatile uint32_t *)(va + 0x7000), *(volatile uint32_t *)(va + 0x7040));
+ 		{

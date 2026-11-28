@@ -1,0 +1,29 @@
+diff --git a/bsd/dev/lavender_gpu.c b/bsd/dev/lavender_gpu.c
+index 5cb458b..4a6913c 100644
+--- a/bsd/dev/lavender_gpu.c
++++ b/bsd/dev/lavender_gpu.c
+@@ -2270,13 +2270,13 @@ step21_draw(int mode)
+ 	ring_pkt4(0xe7d7u, 2);					/* HLSQ_FS_CONSTLEN, _INSTRLEN */
+ 	ring_put(0);
+ 	ring_put(1);
+-	ring_reg(0xe590u, (2u << 10) | (1u << 2) | 0x2);	/* SP_VS_CTRL_REG0 */
++	ring_reg(0xe590u, ((vary ? 3u : 2u) << 10) | (1u << 2) | 0x2);	/* SP_VS_CTRL_REG0 */
+ 	ring_pkt4(0xe294u, 4);					/* VPC_VAR_DISABLE(0..3): no varyings */
+ 	ring_put(vary ? 0xfffffffcu : 0xffffffffu);
+ 	ring_put(0xffffffffu);
+ 	ring_put(0xffffffffu);
+ 	ring_put(0xffffffffu);
+-	ring_reg(0xe593u, vary ? 0x0f000304u : 0xf00u);				/* SP_VS_OUT_REG(0): A = r0, mask xyzw */
++	ring_reg(0xe593u, vary ? 0x0f000308u : 0xf00u);				/* SP_VS_OUT_REG(0): A = r0, mask xyzw */
+ 	ring_reg(0xe5a3u, vary ? 0x200u : 0);					/* SP_VS_VPC_DST_REG(0): OUTLOC0 0 */
+ 	ring_pkt4(0xe5acu, 2);					/* SP_VS_OBJ_START */
+ 	ring_put((uint32_t)vs_pa);
+@@ -2383,7 +2383,7 @@ step21_draw(int mode)
+ 	}
+ 	ring_reg(0xe4cau, 0xfu | (0u << 4));			/* VFD_DEST_CNTL(0): xyzw -> r0 */
+ 	if (vary) {
+-		ring_reg(0xe4cbu, 0xfu | (4u << 4));		/* VFD_DEST_CNTL(1): xyzw -> r1 */
++		ring_reg(0xe4cbu, 0xfu | (8u << 4));		/* VFD_DEST_CNTL(1): xyzw -> r2 (the VS marker tail uses r1) */
+ 	}
+ 	ring_reg(0xe400u, vary ? 2 : 1);			/* VFD_CONTROL_0: VTXCNT */
+ 	ring_pkt4(0xe408u, 2);					/* VFD_INDEX_OFFSET, _INSTANCE_START_OFFSET */

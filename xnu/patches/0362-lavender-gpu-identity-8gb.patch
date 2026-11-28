@@ -1,0 +1,13 @@
+From: port_ios lavender
+Subject: [PATCH 0362] lavender gpu: the GPU's identity table covers the first 8 GB (the IOSurface pages sit above 4 GB)
+
+---
+diff --git a/bsd/dev/lavender_gpu.c b/bsd/dev/lavender_gpu.c
+--- a/bsd/dev/lavender_gpu.c
++++ b/bsd/dev/lavender_gpu.c
+@@ -825,4 +825,4 @@
+ 	}
+-	for (unsigned i = 0; i < 4; i++) {
++	for (unsigned i = 0; i < 8; i++) {
+ 		/* 1 GB block: VA = PA, AF, inner shareable, attr index 0, valid */
+ 		((volatile uint64_t *)pt)[i] = ((uint64_t)i << 30) | (1ull << 10) |

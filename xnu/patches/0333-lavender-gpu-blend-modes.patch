@@ -1,0 +1,37 @@
+diff --git a/bsd/dev/lavender_gpu.c b/bsd/dev/lavender_gpu.c
+index 529404a..c350a08 100644
+--- a/bsd/dev/lavender_gpu.c
++++ b/bsd/dev/lavender_gpu.c
+@@ -2003,10 +2003,12 @@ step21_draw(int mode)
+ 	const uint32_t texel_want = 0xff905077u;	/* texel (2,1) of the 4x4 texture */
+ 	const bool dbg = mode == 3;	/* colour = the interpolated (u, v), no texture */
+ 	const bool tex = mode == 1 || mode == 2;
+-	const bool blend = mode == 4;	/* flat colour with alpha 0.5 blended over D_DST */
++	const bool blend = mode >= 4;	/* flat colour with alpha 0.5 blended over D_DST: 4 SRC_ALPHA/1-SRC_ALPHA, 5 ONE/ZERO, 6 ONE/ONE */
++	const uint32_t blend_ctl = mode == 4 ? 0x00010908u : mode == 5 ? 0x00010001u : 0x00010101u;
++	const uint32_t blend_want = mode == 4 ? D_BLENDED : mode == 5 ? 0x809933ffu : 0x80b9b3ffu;
+ 	const bool vary = mode >= 2 && mode <= 3;
+ 	const uint32_t fill = blend ? D_DST : D_SENTINEL;
+-	const uint32_t want = blend ? D_BLENDED : tex ? texel_want : D_COLOUR;
++	const uint32_t want = blend ? blend_want : tex ? texel_want : D_COLOUR;
+ 	uint32_t bad_want = 0;
+ 
+ 	if (ring_va == 0 || ring_pa == 0) {
+@@ -2241,7 +2243,7 @@ step21_draw(int mode)
+ 	ring_reg(0xe146u, 1);					/* RB_FS_OUTPUT_CNTL: MRT 1 */
+ 	ring_reg(0xe5cau, 1u | (0xfcu << 5) | (0xfcu << 13));	/* SP_FS_OUTPUT_CNTL */
+ 	ring_reg(0xe150u, (3u << 3) | (0xfu << 7) | (blend ? 3u : 0));		/* RB_MRT_CONTROL(0): ROP_COPY, all comps */
+-	ring_reg(0xe151u, blend ? 0x00010908u : 0x10001u);				/* RB_MRT_BLEND_CONTROL(0): src ONE, dst ZERO */
++	ring_reg(0xe151u, blend ? blend_ctl : 0x10001u);				/* RB_MRT_BLEND_CONTROL(0): src ONE, dst ZERO */
+ 	ring_reg(0xe5c9u, 0x100u | (blend ? 1u : 0));				/* SP_BLEND_CNTL */
+ 	if (draw_mark("state")) {
+ 		return;
+@@ -2625,6 +2627,8 @@ lavender_gpu_thread(__unused void *arg, __unused wait_result_t wr_)
+ 	}
+ 	if (step >= 25) {
+ 		step21_draw(4);
++		step21_draw(5);
++		step21_draw(6);
+ 	}
+ 	if (step == 17) {
+ 		step13_compute(4);	/* 64 threads: probe the local id */

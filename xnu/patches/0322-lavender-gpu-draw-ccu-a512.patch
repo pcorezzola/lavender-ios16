@@ -1,0 +1,35 @@
+diff --git a/bsd/dev/lavender_gpu.c b/bsd/dev/lavender_gpu.c
+index 10c03d2..6fb91f5 100644
+--- a/bsd/dev/lavender_gpu.c
++++ b/bsd/dev/lavender_gpu.c
+@@ -2291,8 +2291,8 @@ step21_draw(void)
+ 	}
+ 	for (int var = 0; var < 4; var++) {
+ 		static const uint32_t rc_var[4] = { 0, 0x8, 0, 0 };
+-		static const uint32_t sc_var[4] = { 0, 0x8, 0, 0x8 };
+-		static const uint32_t ccu_var[4] = { 0x10000000u, 0x10000000u, 0x7c13c080u, 0x10000000u };
++		static const uint32_t sc_var[4] = { 0, 0x8, 0x8, 0 };
++		static const uint32_t ccu_var[4] = { 0x08000000u, 0x08000000u, 0x08000000u, 0x04000000u };
+ 		in_ok = in_n = out_ok = out_n = 0;
+ 		first_bad = 0xffffffffu;
+ 		printf("LAVGPU: draw variant %d: RB_RENDER_CNTL %x GRAS_SC_CNTL %x\n", var,
+@@ -2367,6 +2367,19 @@ step21_draw(void)
+ 		flush_dcache64((addr64_t)(pa + 0x7000), 0x80, TRUE);
+ 		printf("LAVGPU: shader markers: VS %08x FS %08x (want a5a50002 / f5f50001)\n",
+ 		    *(volatile uint32_t *)(va + 0x7000), *(volatile uint32_t *)(va + 0x7040));
++		{
++			uint32_t changed = 0, first = 0xffffffffu;
++			for (uint32_t i = 0; i < D_W * D_H; i++) {
++				if (rt[i] != D_SENTINEL) {
++					changed++;
++					if (first == 0xffffffffu) {
++						first = i;
++					}
++				}
++			}
++			printf("LAVGPU: render target words changed: %u, first at %u (%08x)\n", changed,
++			    first, first == 0xffffffffu ? 0 : rt[first]);
++		}
+ 		printf("LAVGPU: samples (24,24)=%08x (30,30)=%08x (40,20)=%08x (50,50)=%08x (2,2)=%08x\n",
+ 		    rt[24 * D_W + 24], rt[30 * D_W + 30], rt[20 * D_W + 40], rt[50 * D_W + 50], rt[2 * D_W + 2]);
+ 		if (first_bad != 0xffffffffu) {

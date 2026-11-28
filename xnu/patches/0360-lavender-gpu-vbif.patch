@@ -1,0 +1,22 @@
+From: port_ios lavender
+Subject: [PATCH 0360] lavender gpu: lavvbif=1 programs the A512 VBIF QoS arbitration and write gating
+
+---
+diff --git a/bsd/dev/lavender_gpu.c b/bsd/dev/lavender_gpu.c
+--- a/bsd/dev/lavender_gpu.c
++++ b/bsd/dev/lavender_gpu.c
+@@ -1075,4 +1075,14 @@
+ 	wr(gpu, A5_CP_ROQ_THRESH_1, 0x40201b16);
+ 	wr(gpu, A5_CP_CHICKEN_DBG, 0x02000000);
++	{
++		/* 0360: what kgsl a5xx_start programs for the A512 VBIF (a540_vbif table): round-robin QoS arbitration, gate off write requests */
++		uint32_t vbif = 0;
++
++		if (PE_parse_boot_argn("lavvbif", &vbif, sizeof(vbif)) && vbif != 0) {
++			wr(gpu, 0x3049u * 4, 3);			/* VBIF_ROUND_ROBIN_QOS_ARB */
++			wr(gpu, 0x302au * 4, 9);			/* VBIF_GATE_OFF_WRREQ_EN */
++			printf("LAVGPU: VBIF qos arb %08x gate-off %08x\n", rd(gpu, 0x3049u * 4), rd(gpu, 0x302au * 4));
++		}
++	}
+ 	wr(gpu, A5_RBBM_INT_0_MASK, 0);
+ 	wr(gpu, A5_CP_RB_CNTL, 12u | (2u << 8) | RB_NO_UPDATE);

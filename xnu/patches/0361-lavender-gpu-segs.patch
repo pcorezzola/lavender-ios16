@@ -1,0 +1,79 @@
+From: port_ios lavender
+Subject: [PATCH 0361] lavender gpu: kLavSegs lists the physical runs behind a range of the caller's memory
+
+---
+diff --git a/iokit/Kernel/arm/LavenderGPU.cpp b/iokit/Kernel/arm/LavenderGPU.cpp
+--- a/iokit/Kernel/arm/LavenderGPU.cpp
++++ b/iokit/Kernel/arm/LavenderGPU.cpp
+@@ -46,4 +46,5 @@
+ 	kLavSubmit      = 3,
+ 	kLavSubmitBuf   = 4,
+ 	kLavMetal       = 5,
++	kLavSegs        = 6,
+ };
+@@ -560,4 +561,65 @@
+ 		ret = lavMetalSet(*(const uint32_t *)args->structureInput);
+ 		break;
++	case kLavSegs:
++		/* 0361: the physical runs behind a range of the caller's memory (an IOSurface), to see whether the GPU could render into it */
++		if (args->structureInput == NULL || size < 16 || args->structureOutput == NULL || args->structureOutputSize < 24) {
++			return kIOReturnBadArgument;
++		}
++		{
++			uint64_t va = ((const uint64_t *)args->structureInput)[0], len = ((const uint64_t *)args->structureInput)[1];
++			uint64_t * o = (uint64_t *)args->structureOutput;
++			uint32_t maxe = (args->structureOutputSize - 24) / 16, ne = 0;
++			uint64_t nseg = 0, longest = 0, total = 0, off = 0, curpa = 0, curlen = 0;
++			IOMemoryDescriptor * md = IOMemoryDescriptor::withAddressRange(va, len, kIODirectionInOut, current_task());
++
++			if (md == NULL) {
++				return kIOReturnNoMemory;
++			}
++			ret = md->prepare();
++			if (ret == kIOReturnSuccess) {
++				while (off < len) {
++					IOByteCount seglen = 0;
++					addr64_t pa = md->getPhysicalSegment(off, &seglen, kIOMemoryMapperNone);
++
++					if (pa == 0 || seglen == 0) {
++						break;
++					}
++					if (curlen != 0 && curpa + curlen == pa) {
++						curlen += seglen;
++					} else {
++						if (curlen != 0) {
++							nseg++;
++							total += curlen;
++							longest = curlen > longest ? curlen : longest;
++							if (ne < maxe) {
++								o[3 + 2 * ne] = curpa;
++								o[4 + 2 * ne] = curlen;
++								ne++;
++							}
++						}
++						curpa = pa;
++						curlen = seglen;
++					}
++					off += seglen;
++				}
++				if (curlen != 0) {
++					nseg++;
++					total += curlen;
++					longest = curlen > longest ? curlen : longest;
++					if (ne < maxe) {
++						o[3 + 2 * ne] = curpa;
++						o[4 + 2 * ne] = curlen;
++						ne++;
++					}
++				}
++				md->complete(kIODirectionInOut);
++			}
++			md->release();
++			o[0] = nseg;
++			o[1] = longest;
++			o[2] = total;
++			args->structureOutputSize = 24 + 16 * ne;
++		}
++		break;
+ 	default:
+ 		IOLog("LavenderGPU: request %u is not known here\n", selector);

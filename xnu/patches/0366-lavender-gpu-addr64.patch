@@ -1,0 +1,28 @@
+From: port_ios lavender
+Subject: [PATCH 0366] lavender gpu: lavaddr64=1 puts all the A5xx blocks in 64-bit address mode (kgsl a5xx_enable_64bit)
+
+---
+diff --git a/bsd/dev/lavender_gpu.c b/bsd/dev/lavender_gpu.c
+--- a/bsd/dev/lavender_gpu.c
++++ b/bsd/dev/lavender_gpu.c
+@@ -1085,5 +1085,20 @@
+ 			printf("LAVGPU: VBIF qos arb %08x gate-off %08x\n", rd(gpu, 0x3049u * 4), rd(gpu, 0x302au * 4));
+ 		}
+ 	}
++	{
++		/* 0366: kgsl (a5xx_enable_64bit) and mainline put every block of the A5xx in 64-bit address mode; the port set only the CP and SECVID_TSB */
++		uint32_t a64 = 0;
++
++		if (PE_parse_boot_argn("lavaddr64", &a64, sizeof(a64)) && a64 != 0) {
++			static const uint32_t am[] = { 0x0bc1, 0x0c81, 0x0cc5, 0x0d01, 0x0e05, 0x0e41, 0x0e61, 0x0e80, 0x0ec1, 0x0f01, 0xf810 };
++			uint32_t bad = 0;
++
++			for (unsigned i = 0; i < sizeof(am) / sizeof(am[0]); i++) {
++				wr(gpu, am[i] * 4, 1);
++				bad += rd(gpu, am[i] * 4) != 1;
++			}
++			printf("LAVGPU: ADDR_MODE_CNTL of 11 more blocks set to 1, %u read back differently\n", bad);
++		}
++	}
+ 	wr(gpu, A5_RBBM_INT_0_MASK, 0);
+ 	wr(gpu, A5_CP_RB_CNTL, 12u | (2u << 8) | RB_NO_UPDATE);

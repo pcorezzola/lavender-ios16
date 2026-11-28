@@ -1,0 +1,72 @@
+From: port_ios lavender
+Subject: [PATCH 0371] lavender: lavtsens=N read-only dump of the SDM660 TSENS sensors
+
+---
+diff --git a/bsd/dev/lavender_gpu.c b/bsd/dev/lavender_gpu.c
+--- a/bsd/dev/lavender_gpu.c
++++ b/bsd/dev/lavender_gpu.c
+@@ -2951,6 +2951,48 @@
+ 	printf("LAVGPU: ladder finished\n");
+ }
+ 
++/*
++ * 0371: lavtsens=N (boot-arg): read-only dump of the 14 SDM660 TSENS sensors every N s (default 30).
++ * dt: /soc/tsens@10ad000 reg 0x10ad000 0x2000 (SROT 0x10ad000, TM 0x10ae000); Linux tsens-v2:
++ * TM_Sn_STATUS = TM + 0xa0 + 4*n, temperature in bits 11:0 signed, tenths of a degree, valid bit 21.
++ * Nothing is written. qcom,sensor-id maps dt client -> hardware sensor; client 8 is "gpu".
++ */
++#define TSENS_TM_PA		0x010ae000UL
++#define TSENS_NSENS		16
++#define TSENS_STATUS(n)		(0xa0u + 4u * (n))
++#define TSENS_VALID		(1u << 21)
++
++static void
++lavender_tsens_thread(__unused void *arg, __unused wait_result_t wr_)
++{
++	uint32_t secs = 30;
++	vm_offset_t tm;
++
++	(void)PE_parse_boot_argn("lavtsens", &secs, sizeof(secs));
++	if (secs < 5) {
++		secs = 5;
++	}
++	lav_wait(40000);
++	tm = ml_io_map(TSENS_TM_PA, 0x1000);
++	if (tm == 0) {
++		printf("LAVTSENS: map failed%s\n", "");
++		return;
++	}
++	printf("LAVTSENS: reading TM 0x%lx every %u s (sensor index = hardware id; tenths of a degree)%s\n", (unsigned long)TSENS_TM_PA, secs, "");
++	for (;;) {
++		int32_t t[TSENS_NSENS];
++
++		for (unsigned i = 0; i < TSENS_NSENS; i++) {
++			uint32_t s = rd(tm, TSENS_STATUS(i));
++
++			t[i] = (s & TSENS_VALID) ? ((int32_t)(s << 20) >> 20) : -9999;
++		}
++		printf("LAVTSENS: %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d%s\n",
++		    t[0], t[1], t[2], t[3], t[4], t[5], t[6], t[7], t[8], t[9], t[10], t[11], t[12], t[13], t[14], t[15], "");
++		lav_wait(secs * 1000);
++	}
++}
++
+ int
+ lavender_gpu_probe(void)
+ {
+@@ -2958,6 +3000,15 @@
+ 	uint32_t step = 0;
+ 	thread_t thread;
+ 
++	static int tsens_started;
++	uint32_t tsens_secs = 0;
++
++	if (!tsens_started && PE_parse_boot_argn("lavtsens", &tsens_secs, sizeof(tsens_secs))) {
++		tsens_started = 1;
++		if (kernel_thread_start(lavender_tsens_thread, NULL, &thread) == KERN_SUCCESS) {
++			thread_deallocate(thread);
++		}
++	}
+ 	if (started || !PE_parse_boot_argn("lavgpu", &step, sizeof(step)) ||
+ 	    step == 0) {
+ 		return 0;

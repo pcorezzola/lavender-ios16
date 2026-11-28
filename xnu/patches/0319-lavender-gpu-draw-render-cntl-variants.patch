@@ -1,0 +1,149 @@
+diff --git a/bsd/dev/lavender_gpu.c b/bsd/dev/lavender_gpu.c
+index a87b7c7..a7c7be5 100644
+--- a/bsd/dev/lavender_gpu.c
++++ b/bsd/dev/lavender_gpu.c
+@@ -2275,69 +2275,84 @@ step21_draw(void)
+ 	if (draw_mark("vtx")) {
+ 		return;
+ 	}
+-	ring_reg(0xe141u, 0x8);					/* RB_RENDER_CNTL */
+-	ring_reg(0xe0a0u, 0x8);					/* GRAS_SC_CNTL */
+-	ring_pkt7(0x38u, 3);					/* CP_DRAW_INDX_OFFSET */
+-	ring_put(4u | (2u << 6));				/* TRILIST, AUTO_INDEX, ignore visibility */
+-	ring_put(1);						/* instances */
+-	ring_put(3);						/* indices */
+-	/* emit_sysmem_fini: CCU flush so the colour cache reaches memory */
+-	ring_pkt7(0x1du, 1);
+-	ring_put(0);
+-	ring_pkt7(CP_WAIT_FOR_IDLE, 0);
+-	ring_pkt7(CP_EVENT_WRITE, 4);
+-	ring_put(0x1du | (1u << 30));				/* PC_CCU_FLUSH_COLOR_TS */
+-	ring_put((uint32_t)(fence_pa + 0x100));
+-	ring_put((uint32_t)((fence_pa + 0x100) >> 32));
+-	ring_put(0x9abcu);
+-	ring_pkt7(CP_WAIT_FOR_IDLE, 0);
+-	ring_pkt4(R_UCHE_INVALIDATE_MIN, 5);
+-	ring_put(0);
+-	ring_put(0);
+-	ring_put(0);
+-	ring_put(0);
+-	ring_put(0x12);
+-	ring_pkt7(CP_WAIT_FOR_IDLE, 0);
+-	ring_pkt7(CP_EVENT_WRITE, 4);
+-	ring_put(0x4u | (1u << 30));				/* CACHE_FLUSH_TS */
+-	ring_put((uint32_t)(fence_pa + 0xc0));
+-	ring_put((uint32_t)((fence_pa + 0xc0) >> 32));
+-	ring_put(0x2345u);
+-	ring_pkt7(CP_WAIT_FOR_IDLE, 0);
+-	if (ring_submit("3D draw") != 0) {
+-		printf("LAVGPU: the CP did not consume the draw\n");
+-		return;
+-	}
+-	lav_wait(100);
+-	flush_dcache64((addr64_t)rt_pa, D_BYTES, TRUE);
+-	for (uint32_t y = 0; y < D_H; y++) {
+-		for (uint32_t x = 0; x < D_W; x++) {
+-			uint32_t got = rt[y * D_W + x];
+-			/* the triangle (16,16) (48,16) (16,48): x + y < 64, x,y >= 16; keep a
+-			 * 2 pixel margin from the edges so rasterisation rules do not matter */
+-			bool inside = x >= 18 && y >= 18 && x + y <= 61;
+-			bool outside = x < 14 || y < 14 || x + y >= 67;
+-			if (inside) {
+-				in_n++;
+-				if (chan_ok(got, D_COLOUR)) {
+-					in_ok++;
+-				} else if (first_bad == 0xffffffffu) {
+-					first_bad = y * D_W + x;
++	for (int var = 0; var < 4; var++) {
++		static const uint32_t rc_var[4] = { 0, 0x8, 0, 0x8 };
++		static const uint32_t sc_var[4] = { 0, 0x8, 0x8, 0 };
++		in_ok = in_n = out_ok = out_n = 0;
++		first_bad = 0xffffffffu;
++		printf("LAVGPU: draw variant %d: RB_RENDER_CNTL %x GRAS_SC_CNTL %x\n", var,
++		    rc_var[var], sc_var[var]);
++		for (uint32_t i = 0; i < D_W * D_H; i++) {
++			rt[i] = D_SENTINEL;
++		}
++		flush_dcache64((addr64_t)rt_pa, D_BYTES, TRUE);
++		ring_reg(0xe141u, rc_var[var]);					/* RB_RENDER_CNTL */
++		ring_reg(0xe0a0u, sc_var[var]);					/* GRAS_SC_CNTL */
++		ring_pkt7(0x38u, 3);					/* CP_DRAW_INDX_OFFSET */
++		ring_put(4u | (2u << 6));				/* TRILIST, AUTO_INDEX, ignore visibility */
++		ring_put(1);						/* instances */
++		ring_put(3);						/* indices */
++		/* emit_sysmem_fini: CCU flush so the colour cache reaches memory */
++		ring_pkt7(0x1du, 1);
++		ring_put(0);
++		ring_pkt7(CP_WAIT_FOR_IDLE, 0);
++		ring_pkt7(CP_EVENT_WRITE, 4);
++		ring_put(0x1du | (1u << 30));				/* PC_CCU_FLUSH_COLOR_TS */
++		ring_put((uint32_t)(fence_pa + 0x100));
++		ring_put((uint32_t)((fence_pa + 0x100) >> 32));
++		ring_put(0x9abcu);
++		ring_pkt7(CP_WAIT_FOR_IDLE, 0);
++		ring_pkt4(R_UCHE_INVALIDATE_MIN, 5);
++		ring_put(0);
++		ring_put(0);
++		ring_put(0);
++		ring_put(0);
++		ring_put(0x12);
++		ring_pkt7(CP_WAIT_FOR_IDLE, 0);
++		ring_pkt7(CP_EVENT_WRITE, 4);
++		ring_put(0x4u | (1u << 30));				/* CACHE_FLUSH_TS */
++		ring_put((uint32_t)(fence_pa + 0xc0));
++		ring_put((uint32_t)((fence_pa + 0xc0) >> 32));
++		ring_put(0x2345u);
++		ring_pkt7(CP_WAIT_FOR_IDLE, 0);
++		if (ring_submit("3D draw") != 0) {
++			printf("LAVGPU: the CP did not consume the draw\n");
++			return;
++		}
++		lav_wait(100);
++		flush_dcache64((addr64_t)rt_pa, D_BYTES, TRUE);
++		for (uint32_t y = 0; y < D_H; y++) {
++			for (uint32_t x = 0; x < D_W; x++) {
++				uint32_t got = rt[y * D_W + x];
++				/* the triangle (16,16) (48,16) (16,48): x + y < 64, x,y >= 16; keep a
++				 * 2 pixel margin from the edges so rasterisation rules do not matter */
++				bool inside = x >= 18 && y >= 18 && x + y <= 61;
++				bool outside = x < 14 || y < 14 || x + y >= 67;
++				if (inside) {
++					in_n++;
++					if (chan_ok(got, D_COLOUR)) {
++						in_ok++;
++					} else if (first_bad == 0xffffffffu) {
++						first_bad = y * D_W + x;
++					}
++				} else if (outside) {
++					out_n++;
++					out_ok += got == D_SENTINEL;
+ 				}
+-			} else if (outside) {
+-				out_n++;
+-				out_ok += got == D_SENTINEL;
+ 			}
+ 		}
+-	}
+-	printf("LAVGPU: 3D draw: %u of %u inside pixels have the colour, %u of %u outside untouched%s, "
+-	    "RBBM_STATUS %08x\n", in_ok, in_n, out_ok, out_n,
+-	    (in_ok == in_n && out_ok == out_n) ? " (ALL CORRECT)" : "", rd(gpu, A5_RBBM_STATUS));
+-	printf("LAVGPU: samples (24,24)=%08x (30,30)=%08x (40,20)=%08x (50,50)=%08x (2,2)=%08x\n",
+-	    rt[24 * D_W + 24], rt[30 * D_W + 30], rt[20 * D_W + 40], rt[50 * D_W + 50], rt[2 * D_W + 2]);
+-	if (first_bad != 0xffffffffu) {
+-		printf("LAVGPU: first wrong inside pixel (%u,%u): got %08x want %08x\n",
+-		    first_bad % D_W, first_bad / D_W, rt[first_bad], D_COLOUR);
++		printf("LAVGPU: 3D draw: %u of %u inside pixels have the colour, %u of %u outside untouched%s, "
++		    "RBBM_STATUS %08x\n", in_ok, in_n, out_ok, out_n,
++		    (in_ok == in_n && out_ok == out_n) ? " (ALL CORRECT)" : "", rd(gpu, A5_RBBM_STATUS));
++		printf("LAVGPU: samples (24,24)=%08x (30,30)=%08x (40,20)=%08x (50,50)=%08x (2,2)=%08x\n",
++		    rt[24 * D_W + 24], rt[30 * D_W + 30], rt[20 * D_W + 40], rt[50 * D_W + 50], rt[2 * D_W + 2]);
++		if (first_bad != 0xffffffffu) {
++			printf("LAVGPU: first wrong inside pixel (%u,%u): got %08x want %08x\n",
++			    first_bad % D_W, first_bad / D_W, rt[first_bad], D_COLOUR);
++		}
++		if (in_ok == in_n && out_ok == out_n) {
++			break;
++		}
+ 	}
+ }
+ 

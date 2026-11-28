@@ -1,0 +1,13 @@
+diff --git a/bsd/dev/lavender_gpu.c b/bsd/dev/lavender_gpu.c
+index c350a08..4ee864b 100644
+--- a/bsd/dev/lavender_gpu.c
++++ b/bsd/dev/lavender_gpu.c
+@@ -2004,7 +2004,7 @@ step21_draw(int mode)
+ 	const bool dbg = mode == 3;	/* colour = the interpolated (u, v), no texture */
+ 	const bool tex = mode == 1 || mode == 2;
+ 	const bool blend = mode >= 4;	/* flat colour with alpha 0.5 blended over D_DST: 4 SRC_ALPHA/1-SRC_ALPHA, 5 ONE/ZERO, 6 ONE/ONE */
+-	const uint32_t blend_ctl = mode == 4 ? 0x00010908u : mode == 5 ? 0x00010001u : 0x00010101u;
++	const uint32_t blend_ctl = mode == 4 ? 0x00010706u : mode == 5 ? 0x00010001u : 0x00010101u;
+ 	const uint32_t blend_want = mode == 4 ? D_BLENDED : mode == 5 ? 0x809933ffu : 0x80b9b3ffu;
+ 	const bool vary = mode >= 2 && mode <= 3;
+ 	const uint32_t fill = blend ? D_DST : D_SENTINEL;

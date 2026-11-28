@@ -1,0 +1,49 @@
+From: port_ios lavender
+Subject: [PATCH 0354] lavender: read-only dump of the SPMI PMIC arbiter (sweetspmi=1)
+
+First step towards programming the Gold rail voltage above 0.700 V: look at the arbiter
+registers (ppid to apid map) before writing any PMIC register.
+
+---
+1
+diff --git a/bsd/dev/santoni_sdhci.c b/bsd/dev/santoni_sdhci.c
+--- a/bsd/dev/santoni_sdhci.c
++++ b/bsd/dev/santoni_sdhci.c
+@@ -4719,6 +4719,29 @@
+ 		}
+ 	}
+ 	printf("SWEET CPUPROBE: done, cfg 0x%08x %u MHz\n", *cf, sweet_cpuprobe_mhz());
++}
++
++/*
++ * 0354: read-only look at the SPMI PMIC arbiter (boot-arg sweetspmi=1), the first step to raising
++ * the Gold rail above the 0.700 V that covers 1113.6 MHz. The arbiter core is at 0x800f000
++ * (the DT lists core 0x800f000, chnls 0x8400000, obsrvr 0x9400000, intr 0xa400000, cnfg 0x800a000).
++ * Dump the non-zero rows of the core page, the version word and the config page start.
++ */
++static void
++sweet_spmi_dump(void)
++{
++	uint32_t on = 0;
++
++	if (!PE_parse_boot_argn("sweetspmi", &on, sizeof(on)) || on == 0) {
++		return;
++	}
++	if (on & 1) {
++		sweet_osm_dump_range("spmicore", 0x800f000ull, 0x1000);
++	}
++	if (on & 2) {
++		sweet_osm_dump_range("spmicnfg", 0x800a000ull, 0x3000);
++	}
++	printf("SWEET SPMI: dump done\n");
+ }
+ 
+ /*
+@@ -5737,6 +5760,7 @@
+ 		sweet_osm_dump();       /* 0351: boot-arg sweetosm=1 */
+ 		sweet_cpul();           /* 0352: boot-arg sweetcpul=L */
+ 		sweet_cpuprobe();       /* 0353: boot-arg sweetcpuprobe=1 */
++		sweet_spmi_dump();      /* 0354: boot-arg sweetspmi=1 */
+ 	}
+ 	if (!error) {
+ 		stage = "GPT partition";

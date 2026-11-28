@@ -1,0 +1,109 @@
+From: port_ios lavender
+Subject: [PATCH 0352] lavender: raise the Gold cluster PLL (sweetcpul=L, capped at 0x3a = 1113.6 MHz)
+
+ABL leaves the perf cluster at L=0x20 (614 MHz) and nothing programs the OSM. TWRP's
+downstream kernel shows this chip's CPR corners (apc1): 1113.6 MHz needs 0.700 V, the same
+as the lowest OPPs. Park the RCG on XO, reprogram the PLL L, wait lock, switch back.
+
+---
+ok
+ok
+diff --git a/bsd/dev/santoni_sdhci.c b/bsd/dev/santoni_sdhci.c
+--- a/bsd/dev/santoni_sdhci.c
++++ b/bsd/dev/santoni_sdhci.c
+@@ -4579,6 +4579,87 @@
+ }
+ 
+ /*
++ * 0352: raise the Gold (perf) cluster clock (boot-arg sweetcpul=L, PLL ref 19.2 MHz).
++ * ABL leaves L = 0x20 (614.4 MHz); the OSM that normally steps it is not programmed.
++ * TWRP's downstream kernel (CPR corner table of this very chip, read from
++ * /sys/kernel/debug/cpr3-regulator/apc1) needs only 0.700 V for 1113.6 MHz (L = 58),
++ * the same corner as the low OPPs, so one step to <= 0x3a needs no voltage change.
++ * L is capped at 0x3a. The RCG at 0x17811050/54 is parked on XO while the PLL is
++ * reprogrammed (MODE bit0 OUTCTRL, bit1 BYPASSNL, bit2 RESET_N, bit31 LOCK_DET).
++ */
++static int
++sweet_cpul_rcg_update(volatile uint32_t *cmd)
++{
++	*cmd |= 1u;
++	for (int i = 0; i < 1000; i++) {
++		if (!(*cmd & 1u)) {
++			return 0;
++		}
++		delay(1);
++	}
++	return ETIMEDOUT;
++}
++
++static void
++sweet_cpul(void)
++{
++	uint32_t l = 0, oldl, mode, cfg;
++	vm_offset_t pll, rcg;
++	volatile uint32_t *p, *cmd, *cf;
++
++	if (!PE_parse_boot_argn("sweetcpul", &l, sizeof(l)) || l == 0) {
++		return;
++	}
++	if (l > 0x3a) {
++		l = 0x3a;
++	}
++	pll = ml_io_map(0x17816000ull, 0x1000);
++	rcg = ml_io_map(0x17811000ull, 0x1000);
++	if (!pll || !rcg) {
++		printf("SWEET CPUL: no mapping\n");
++		return;
++	}
++	p = (volatile uint32_t *)pll;
++	cmd = (volatile uint32_t *)(rcg + 0x50);
++	cf = (volatile uint32_t *)(rcg + 0x54);
++	oldl = p[1];
++	mode = p[0];
++	cfg = *cf;
++	printf("SWEET CPUL: mode 0x%08x L 0x%x rcg cfg 0x%08x cmd 0x%08x -> L 0x%x\n", mode, oldl, cfg, *cmd, l);
++	if (l <= oldl || (mode & 7) != 7) {
++		printf("SWEET CPUL: nothing to do\n");
++		return;
++	}
++	/* park the cluster on XO (source 0) */
++	*cf = cfg & ~(7u << 8);
++	if (sweet_cpul_rcg_update(cmd)) {
++		*cf = cfg;
++		(void)sweet_cpul_rcg_update(cmd);
++		printf("SWEET CPUL: RCG update to XO timed out\n");
++		return;
++	}
++	/*
++	 * The downstream clk-cpu-osm bring-up (clk_osm_setup_cluster_pll) writes MODE 0,
++	 * L, then MODE 2, 10 us, MODE 6, 50-75 us, MODE 7 and never polls a lock bit:
++	 * MODE bit 31 does not read back as lock here (it is 0 while the PLL runs).
++	 */
++	p[0] = 0;
++	p[1] = l;
++	(void)p[1];
++	p[0] = 2;
++	delay(10);
++	p[0] = 6;
++	delay(75);
++	p[0] = 7;
++	delay(100);
++	/* 0353 probe: source 3 (and 5) is the PLL (1112 MHz at L = 0x3a); source 4, left by ABL, is a 600 MHz GPLL0. */
++	*cf = (cfg & ~(7u << 8)) | (3u << 8);
++	(void)sweet_cpul_rcg_update(cmd);
++	printf("SWEET CPUL: %s, mode 0x%08x L 0x%x rcg cfg 0x%08x cmd 0x%08x\n",
++	    "done", p[0], p[1], *cf, *cmd);
++}
++
++/*
+  * 0179: sdhci_read_pio()/sdhci_write_pio() already leave the controller
+  * recovered before they return an error - sdhci_recover() resets the
+  * command/data paths and, if an inhibit bit is still stuck, cycles the card
+@@ -5592,6 +5673,7 @@
+ 	if (!error) {
+ 		sdhci_speedup();        /* 0349: optional, never fails the probe */
+ 		sweet_osm_dump();       /* 0351: boot-arg sweetosm=1 */
++		sweet_cpul();           /* 0352: boot-arg sweetcpul=L */
+ 	}
+ 	if (!error) {
+ 		stage = "GPT partition";

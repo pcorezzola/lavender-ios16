@@ -1,0 +1,36 @@
+diff --git a/bsd/kern/sweet_amfi.c b/bsd/kern/sweet_amfi.c
+index cb67b4d..0ed1e88 100644
+--- a/bsd/kern/sweet_amfi.c
++++ b/bsd/kern/sweet_amfi.c
+@@ -279,9 +279,15 @@ sweet_amfi_vnode_check_signature(struct vnode *vp, __unused struct label *label,
+  * launchd reports mach lookups as "error = 159: Sandbox restriction"
+  * (backboardd cannot reach mobilegestalt or iohideventsystem; tccd:
+  * "profile not found"). SWEET runs without a sandbox: operations succeed
+- * (checks allow, profile init is accepted); the few that must return
+- * data (container paths, extension tokens) fail with ENOENT. The first
+- * use of each operation number is logged.
++ * (checks allow, profile init is accepted); container paths (ops 4 and
++ * 0x43) still fail with ENOENT. Extension issue/consume (ops 5/6) also
++ * succeed (0902): tccd cannot issue the kTCCServicePhotos extension
++ * otherwise and assetsd then aborts in a loop with
++ * NSInternalInconsistencyException "requires TCCPhotosService access"
++ * (captured with the 0901 abort-message + sweetscan heap scan). The
++ * issued token buffer stays uninitialized; it is only ever consumed by
++ * our own op 6, which succeeds without validating it. The first use of
++ * each operation number is logged.
+  */
+ static uint64_t sweet_sandbox_seen;
+ 
+@@ -296,11 +302,9 @@ sweet_sandbox_syscall(struct proc *p, int call, __unused user_addr_t arg)
+ 	}
+ 	switch (call) {
+ 	case 4:         /* container path (audit token / pid) */
+-	case 5:         /* extension issue */
+-	case 6:         /* extension consume */
+ 	case 0x43:      /* container expected */
+ 		return ENOENT;
+-	default:
++	default:        /* extension issue/consume (5/6) succeed: no sandbox */
+ 		return 0;
+ 	}
+ }

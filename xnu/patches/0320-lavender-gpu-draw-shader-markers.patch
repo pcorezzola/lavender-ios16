@@ -1,0 +1,85 @@
+diff --git a/bsd/dev/lavender_gpu.c b/bsd/dev/lavender_gpu.c
+index a7c7be5..d813d20 100644
+--- a/bsd/dev/lavender_gpu.c
++++ b/bsd/dev/lavender_gpu.c
+@@ -1951,6 +1951,26 @@ draw_mark(const char *what)
+ 	return -1;
+ }
+ 
++/* mov r1.x/y/z = address lo/hi/value; two (rpt5)nop; stg; (rpt5)nop; end (hand-assembled, as in the compute test) */
++static int
++shader_store_tail(uint32_t *p, int at, uint64_t addr, uint32_t val)
++{
++	shader_mov(&p[at], 4, (uint32_t)addr);
++	shader_mov(&p[at + 2], 5, (uint32_t)(addr >> 32));
++	shader_mov(&p[at + 4], 6, val);
++	p[at + 6] = 0;
++	p[at + 7] = 0x00000500u;
++	p[at + 8] = 0;
++	p[at + 9] = 0x00000500u;
++	p[at + 10] = 0x01800000u | (6u << 1);	/* stg.u32 g[r1.x], r1.z, 1 */
++	p[at + 11] = 0xc0c60100u | (4u << 9);
++	p[at + 12] = 0;
++	p[at + 13] = 0x00000500u;
++	p[at + 14] = 0;
++	p[at + 15] = 0x03000000u;		/* end */
++	return at + 16;
++}
++
+ static void
+ step21_draw(void)
+ {
+@@ -1970,7 +1990,7 @@ step21_draw(void)
+ 		printf("LAVGPU: step 21 needs steps 10-12\n");
+ 		return;
+ 	}
+-	if (lav_alloc(0x7000, PAGE_MASK, &va, &pa)) {
++	if (lav_alloc(0x8000, PAGE_MASK, &va, &pa)) {
+ 		printf("LAVGPU: no pages for the draw\n");
+ 		return;
+ 	}
+@@ -1983,20 +2003,14 @@ step21_draw(void)
+ 	vb = (uint32_t *)(va + 0x2000);
+ 	rt = (volatile uint32_t *)(va + 0x3000);
+ 
+-	/* VS: the position is already in r0.xyzw (the vertex fetch writes it) */
+-	vs[0] = 0;
+-	vs[1] = 0x00000500u;		/* (rpt5)nop */
+-	vs[2] = 0;
+-	vs[3] = 0x03000000u;		/* end */
+-	/* FS: r0.xyzw = (1.0, 0.2, 0.6, 1.0) */
++	/* VS: the position is already in r0.xyzw; it also stores a marker word */
++	shader_store_tail(vs, 0, pa + 0x7000, 0xa5a50002u);
++	/* FS: r0.xyzw = (1.0, 0.2, 0.6, 1.0), and it stores a marker word */
+ 	shader_mov(&fs[0], 0, 0x3f800000u);
+ 	shader_mov(&fs[2], 1, 0x3e4ccccdu);
+ 	shader_mov(&fs[4], 2, 0x3f19999au);
+ 	shader_mov(&fs[6], 3, 0x3f800000u);
+-	fs[8] = 0;
+-	fs[9] = 0x00000500u;
+-	fs[10] = 0;
+-	fs[11] = 0x03000000u;
++	shader_store_tail(fs, 8, pa + 0x7040, 0xf5f50001u);
+ 	for (int i = 0; i < 3; i++) {
+ 		for (int c = 0; c < 4; c++) {
+ 			vb[i * 4 + c] = vtx[i][c];
+@@ -2286,6 +2300,9 @@ step21_draw(void)
+ 			rt[i] = D_SENTINEL;
+ 		}
+ 		flush_dcache64((addr64_t)rt_pa, D_BYTES, TRUE);
++		*(volatile uint32_t *)(va + 0x7000) = 0;
++		*(volatile uint32_t *)(va + 0x7040) = 0;
++		flush_dcache64((addr64_t)(pa + 0x7000), 0x80, TRUE);
+ 		ring_reg(0xe141u, rc_var[var]);					/* RB_RENDER_CNTL */
+ 		ring_reg(0xe0a0u, sc_var[var]);					/* GRAS_SC_CNTL */
+ 		ring_pkt7(0x38u, 3);					/* CP_DRAW_INDX_OFFSET */
+@@ -2344,6 +2361,9 @@ step21_draw(void)
+ 		printf("LAVGPU: 3D draw: %u of %u inside pixels have the colour, %u of %u outside untouched%s, "
+ 		    "RBBM_STATUS %08x\n", in_ok, in_n, out_ok, out_n,
+ 		    (in_ok == in_n && out_ok == out_n) ? " (ALL CORRECT)" : "", rd(gpu, A5_RBBM_STATUS));
++		flush_dcache64((addr64_t)(pa + 0x7000), 0x80, TRUE);
++		printf("LAVGPU: shader markers: VS %08x FS %08x (want a5a50002 / f5f50001)\n",
++		    *(volatile uint32_t *)(va + 0x7000), *(volatile uint32_t *)(va + 0x7040));
+ 		printf("LAVGPU: samples (24,24)=%08x (30,30)=%08x (40,20)=%08x (50,50)=%08x (2,2)=%08x\n",
+ 		    rt[24 * D_W + 24], rt[30 * D_W + 30], rt[20 * D_W + 40], rt[50 * D_W + 50], rt[2 * D_W + 2]);
+ 		if (first_bad != 0xffffffffu) {
