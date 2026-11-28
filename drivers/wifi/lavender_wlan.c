@@ -3458,38 +3458,15 @@ wlan_rails_on(void)
 	 * Linux rpm-smd client does. The SPI is already Group1NS/edge,
 	 * so the RPM OPEN_ACK interrupt latches in GICD_ISPENDR.
 	 */
-	{
-		uint8_t open[32];
-		uint32_t name_len = sizeof(RPM_CHAN);
-		uint32_t olen = (8 + name_len + 7) & ~7u;
-
-		memset(open, 0, sizeof(open));
-		open[0] = 2;           /* CMD_OPEN */
-		open[2] = (uint8_t)RPM_LCID;
-		open[4] = (uint8_t)name_len;
-		memcpy(open + 8, RPM_CHAN, name_len);
-		printf("SWEET RPM: open %s (%u bytes)\n", RPM_CHAN, olen);
-		(void)rpm_tx(open, olen, NULL, 0);
-		printf("SWEET RPM: open written\n");
-	}
-	for (i = 0; i < 2000 && !rpm_open; i++) {
-		uint32_t pend = *(volatile uint32_t *)(gicd + GICD_ISPENDR6);
-
-		if ((pend & RPM_GIC_BIT) != 0) {
-			*(volatile uint32_t *)(gicd + GICD_ICPENDR6) = RPM_GIC_BIT;
-			wlan_mb();
-			printf("SWEET RPM: open irq %u\n", i);
-			rpm_poll();
-		}
-		if (!rpm_open) {
-			wlan_wait(1);
-		}
-	}
-	printf("SWEET RPM: open state %u\n", rpm_open);
-	if (!rpm_open) {
-		printf("SWEET RPM: no OPEN_ACK, stop\n");
-		return;
-	}
+	/*
+	 * 0770: do not send CH_OPEN. 0769 died right after the OPEN kick:
+	 * the RPM answers that one and something in its handling (likely
+	 * the duplicate remote open left by ABL) resets the SoC. If ABL
+	 * left rpm_requests open with lcid 1, TX_DATA on lcid 1 is still
+	 * routed to the rpm-smd server, so send the rail and clock
+	 * requests directly. If the channel is closed at the RPM the
+	 * requests are dropped harmlessly.
+	 */
 	/*
 	 * 0764: the Xiaomi 4.4 icnss driver (lavender-q-oss) votes these
 	 * exact values: 800000 / 1800000 / 1304000 / 3312000 uV, rails
