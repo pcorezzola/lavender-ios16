@@ -3444,43 +3444,15 @@ wlan_rails_on(void)
 		wlan_mb();
 		printf("SWEET RPM: gic grp %x cfg %x\n", g, c);
 	}
-	printf("SWEET RPM: v1 version\n");
-	printf("SWEET RPM: gicd idr %x ctlr %x\n",
-	    *(volatile uint32_t *)(gicd + 0x4),
-	    *(volatile uint32_t *)(gicd + 0x0));
-	rpm_cmd(0, 1, 0);              /* VERSION v1 + IPC kick */
-	for (i = 0; i < 2000 && !rpm_ver; i++) {
-		uint32_t pend = *(volatile uint32_t *)(gicd + GICD_ISPENDR6);
-
-		if ((pend & RPM_GIC_BIT) != 0) {
-			*(volatile uint32_t *)(gicd + GICD_ICPENDR6) = RPM_GIC_BIT;
-			wlan_mb();
-			printf("SWEET RPM: ver irq %u\n", i);
-			rpm_poll();
-		}
-		if (!rpm_ver) {
-			wlan_wait(1);
-		}
-	}
-	printf("SWEET RPM: ver state %u\n", rpm_ver);
-	if (!rpm_ver) {
-		printf("SWEET RPM: pend %x %x %x %x %x %x %x %x\n",
-		    *(volatile uint32_t *)(gicd + 0x200),
-		    *(volatile uint32_t *)(gicd + 0x204),
-		    *(volatile uint32_t *)(gicd + 0x208),
-		    *(volatile uint32_t *)(gicd + 0x20c),
-		    *(volatile uint32_t *)(gicd + 0x210),
-		    *(volatile uint32_t *)(gicd + 0x214),
-		    *(volatile uint32_t *)(gicd + 0x218),
-		    *(volatile uint32_t *)(gicd + 0x21c));
-		printf("SWEET RPM: apcs %x tx %x %x\n",
-		    apcs != 0 ? wlan_rd(apcs, APCS_IPC_OFF) : 0,
-		    rpm_rd32(rpm_tx_off), rpm_rd32(rpm_tx_off + 4));
-	}
-	if (!rpm_ver) {
-		printf("SWEET RPM: no version, stop\n");
-		return;
-	}
+	/*
+	 * 0768: the RPM negotiated GLINK with ABL before booting iOS, so
+	 * its core is already OPENED and glink_core_rx_cmd_version()
+	 * returns early on our VERSION without replying (0765-0767: the
+	 * message is consumed, tx read == head, but no interrupt). Skip
+	 * the version exchange and open the channel directly, as the
+	 * Linux rpm-smd client does. The SPI is already Group1NS/edge,
+	 * so the RPM OPEN_ACK interrupt latches in GICD_ISPENDR.
+	 */
 	{
 		uint8_t open[32];
 		uint32_t name_len = sizeof(RPM_CHAN);
