@@ -1,0 +1,171 @@
+diff --git a/bsd/dev/lavender_cam.c b/bsd/dev/lavender_cam.c
+index f437278..48fbf7e 100644
+--- a/bsd/dev/lavender_cam.c
++++ b/bsd/dev/lavender_cam.c
+@@ -14,10 +14,11 @@
+  *                   register interfaces, and switch back off exactly what
+  *                   this probe switched on
+  *   lvcam=3         ... and power camera@0 (reset low, VANA on gpio46, VDIG
+- *                   on PM660L pad 3, reset high) and walk the sensor bus by
+- *                   hand on the CCI pins, printing every address that answers
+- *                   and the two chip IDs it can read; the rails go off again
+- *                   afterwards. Only camera@0 (lvcamsel=0) in this build.
++ *                   on PM660L pad 3, MCLK0 at 24 MHz, reset high) and walk
++ *                   the sensor bus by hand on the CCI pins, printing every
++ *                   address that answers and the two chip IDs it can read;
++ *                   the rails go off again afterwards. Only camera@0
++ *                   (lvcamsel=0) in this build.
+  *   lvcam=4         the same rails without the PM660L step (VANA and the
+  *                   reset only, VDIG left as found; lvcamsmoke=1 forces
+  *                   this at lvcam=3). 1011 prints one line before every
+@@ -37,6 +38,10 @@
+  *                   F1 drives VDIG instead of aborting. 1015 drives LV/MV
+  *                   pads (VDIG is subtype 0x10) the way mainline does: mode
+  *                   in MODE_CTL, the value in DIG_OUT_SOURCE_CTL bit 7.
++ *                   1016 enables MCLK0 at 24 MHz (MMPLL10 576 MHz / 24)
++ *                   between VDIG and the reset, as the DTB's
++ *                   qcom,cam-power-seq-* does; the sensor does not answer
++ *                   on I2C without it.
+  *   lvcamsel=0/1/2  the camera the driver works on from F1 on: 0 the rear
+  *                   main (camera@0, csiphy0/csid0, CCI master 0), 1 the
+  *                   second rear (camera@1, csiphy1/csid1, master 1, has
+@@ -118,9 +123,9 @@ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ #define CAM_MMCC_BIMC_SMMU_AHB_CBCR 0xe004u
+ #define CAM_MMCC_BIMC_SMMU_AXI_CBCR 0xe008u
+ 
+-/* MMPLL10: MODE at the PLL offset, STATUS at +0x24 (clk-alpha-pll.c, the
+- * DEFAULT type); LOCK_DET is STATUS bit 31, MODE bits 0/1/2 are
+- * OUTCTRL/BYPASSNL/RESET_N. */
++/* MMPLL10: MODE at the PLL offset (bit 31 = LOCK_DET, bits 0/1/2 =
++ * OUTCTRL/BYPASSNL/RESET_N, clk-alpha-pll.c); STATUS at +0x24 is only
++ * informative. */
+ #define CAM_MMCC_MMPLL10_MODE       0x0190u
+ #define CAM_MMCC_MMPLL10_STATUS     0x01b4u
+ #define CAM_PLL_LOCK_DET            (1u << 31)
+@@ -972,11 +977,106 @@ cam_tlmm_drive(uint32_t pin, int high)
+ 	cam_wr(tlmm, pin * 0x1000u, CAM_TLMM_OE);
+ }
+ 
++/*
++ * 1016: MCLK0 = 24 MHz, the clock the stock power sequence (the sensor's
++ * qcom,cam-power-seq-* in the DTB) enables between the rails and the reset.
++ * MMPLL10 is 576 MHz (19.2 MHz * L=30); mclk0_src divides it by 24 with the
++ * MND divider of the RCG2, exactly the ftbl_mclk0_clk_src 24 MHz entry of
++ * mmcc-sdm660.c ("F(24000000, P_MMPLL10, 1, 1, 24)").
++ */
++#define CAM_MMCC_MMPLL10_L_VAL      0x0194u
++#define CAM_MMCC_MMPLL10_USER_CTL   0x01a0u
++#define CAM_MMCC_MMPLL10_CONFIG_CTL 0x01a8u
++#define CAM_PLL_OUTCTRL         (1u << 0)
++#define CAM_PLL_BYPASSNL        (1u << 1)
++#define CAM_PLL_RESET_N         (1u << 2)
++#define CAM_PLL_USER_MAIN_OUT   (1u << 0)
++#define CAM_MMCC_MCLK0_RCG      0x3360u
++#define CAM_RCG_M_REG           0x08u
++#define CAM_RCG_N_REG           0x0cu
++#define CAM_RCG_D_REG           0x10u
++#define CAM_MMCC_MCLK0_CBCR     0x3384u
++#define CAM_RCG_CFG_MCLK0_24MHZ 0x2301u  /* div 1 | src MMPLL10 (3) | dual */
++#define CAM_GPIO_MCLK0          32u      /* TLMM function 1 = cam_mclk */
++
++static int
++cam_mclk_on(void)
++{
++	uint32_t v;
++	unsigned i;
++
++	printf("SWEET CAM: mclk: MMPLL10 576 MHz, mclk0 24 MHz\n");
++	cam_wr(mmcc, CAM_MMCC_MMPLL10_L_VAL, 0x1eu);
++	cam_wr(mmcc, CAM_MMCC_MMPLL10_CONFIG_CTL, 0x00004289u);
++	v = cam_rd(mmcc, CAM_MMCC_MMPLL10_USER_CTL);
++	cam_wr(mmcc, CAM_MMCC_MMPLL10_USER_CTL, v | CAM_PLL_USER_MAIN_OUT);
++
++	v = cam_rd(mmcc, CAM_MMCC_MMPLL10_MODE);
++	cam_wr(mmcc, CAM_MMCC_MMPLL10_MODE, v | CAM_PLL_BYPASSNL);
++	cam_spin_us(5);
++	v = cam_rd(mmcc, CAM_MMCC_MMPLL10_MODE);
++	cam_wr(mmcc, CAM_MMCC_MMPLL10_MODE, v | CAM_PLL_RESET_N);
++	for (i = 0; i < 1000; i++) {
++		if (cam_rd(mmcc, CAM_MMCC_MMPLL10_MODE) & CAM_PLL_LOCK_DET) {
++			break;
++		}
++		cam_wait(1);
++	}
++	if (i == 1000) {
++		printf("SWEET CAM: mclk: MMPLL10 did not lock (mode %08x)\n",
++		    cam_rd(mmcc, CAM_MMCC_MMPLL10_MODE));
++		return ETIMEDOUT;
++	}
++	v = cam_rd(mmcc, CAM_MMCC_MMPLL10_MODE);
++	cam_wr(mmcc, CAM_MMCC_MMPLL10_MODE, v | CAM_PLL_OUTCTRL);
++	printf("SWEET CAM: mclk: MMPLL10 mode %08x (locked)\n",
++	    cam_rd(mmcc, CAM_MMCC_MMPLL10_MODE));
++
++	cam_wr(mmcc, CAM_MMCC_MCLK0_RCG + CAM_RCG_M_REG, 0x00000001u);
++	cam_wr(mmcc, CAM_MMCC_MCLK0_RCG + CAM_RCG_N_REG, 0x000000e8u);
++	cam_wr(mmcc, CAM_MMCC_MCLK0_RCG + CAM_RCG_D_REG, 0x000000e7u);
++	cam_wr(mmcc, CAM_MMCC_MCLK0_RCG + 0x04u, CAM_RCG_CFG_MCLK0_24MHZ);
++	v = cam_rd(mmcc, CAM_MMCC_MCLK0_RCG);
++	cam_wr(mmcc, CAM_MMCC_MCLK0_RCG, v | CAM_RCG_CMD_UPDATE);
++	for (i = 0; i < 500; i++) {
++		if (!(cam_rd(mmcc, CAM_MMCC_MCLK0_RCG) &
++		    CAM_RCG_CMD_UPDATE)) {
++			break;
++		}
++		cam_spin_us(1);
++	}
++	v = cam_rd(mmcc, CAM_MMCC_MCLK0_RCG);
++	cam_wr(mmcc, CAM_MMCC_MCLK0_RCG,
++	    (v | CAM_RCG_CMD_ROOT_EN) & ~CAM_RCG_CMD_ROOT_OFF);
++	for (i = 0; i < 1000; i++) {
++		if (!(cam_rd(mmcc, CAM_MMCC_MCLK0_RCG) &
++		    CAM_RCG_CMD_ROOT_OFF)) {
++			break;
++		}
++		cam_wait(1);
++	}
++	v = cam_rd(mmcc, CAM_MMCC_MCLK0_CBCR);
++	cam_wr(mmcc, CAM_MMCC_MCLK0_CBCR, v | CAM_CBCR_EN);
++	for (i = 0; i < 1000; i++) {
++		if (!(cam_rd(mmcc, CAM_MMCC_MCLK0_CBCR) & CAM_CBCR_CLK_OFF)) {
++			break;
++		}
++		cam_wait(1);
++	}
++	cam_wr(tlmm, CAM_GPIO_MCLK0 * 0x1000u + 4u, 0);
++	cam_wr(tlmm, CAM_GPIO_MCLK0 * 0x1000u, (1u << 2) | (2u << 6));
++	printf("SWEET CAM: mclk: rcg cmd %08x cfg %08x, cbcr %08x, pin %08x\n",
++	    cam_rd(mmcc, CAM_MMCC_MCLK0_RCG),
++	    cam_rd(mmcc, CAM_MMCC_MCLK0_RCG + 0x04u),
++	    cam_rd(mmcc, CAM_MMCC_MCLK0_CBCR),
++	    cam_rd(tlmm, CAM_GPIO_MCLK0 * 0x1000u));
++	return 0;
++}
++
+ /*
+  * The camera@0 rail sequence of the DTB: reset low while the rails come up,
+- * then VANA (TLMM gpio46), VDIG (PM660L pad 3), and the reset released 5 ms
+- * later; the sensor's I2C answers without MCLK, so no clock is programmed in
+- * this step.
++ * then VANA (TLMM gpio46), VDIG (PM660L pad 3), MCLK0 (24 MHz, 1016) and the
++ * reset released 10 ms later.
+  */
+ static int
+ cam_f1_rails_up(void)
+@@ -1045,8 +1145,14 @@ cam_f1_rails_up(void)
+ 		cam_pad_restore(CAM_PM660L_SID, CAM_PM660L_DVDD0, &cam_dvdd);
+ 		return err;
+ 	}
+-	printf("SWEET CAM: rails step 7: releasing the reset\n");
+-	cam_wait(5);
++	printf("SWEET CAM: rails step 7: enabling MCLK0 (24 MHz)\n");
++	cam_wait(300);
++	if (cam_mclk_on() != 0) {
++		printf("SWEET CAM: MCLK0 did not come up; releasing the reset "
++		    "anyway\n");
++	}
++	printf("SWEET CAM: rails step 8: releasing the reset\n");
++	cam_wait(10);
+ 	cam_tlmm_drive(CAM_GPIO_RESET0, 1);
+ 	cam_wait(10);
+ 	printf("SWEET CAM: rails: reset io now %08x\n",
