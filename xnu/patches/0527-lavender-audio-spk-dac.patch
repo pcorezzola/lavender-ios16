@@ -1,0 +1,16 @@
+diff --git a/bsd/dev/lavender_audio.c b/bsd/dev/lavender_audio.c
+index bb6fe01..dd7e212 100644
+--- a/bsd/dev/lavender_audio.c
++++ b/bsd/dev/lavender_audio.c
+@@ -2885,6 +2885,11 @@ audio_pm660l_speaker(void)
+ 	(void)pm660l_update(0x0046, 0x80, 0x80);   /* CDC_RST_CTL */
+ 	(void)pm660l_update(0x0048, 0x0c, 0x0c);   /* CDC_TOP_CLK_CTL */
+ 	audio_wait(2);
++	/* Vendor DAPM "SPK DAC": SPKR_DAC_CTL bit 7 = 0 enables the DAC; the
++	 * current limit goes back to the vendor default 0x82. */
++	(void)pm660l_update(0x00b0, 0x03, 0x03);   /* SPKR_DAC_CTL */
++	(void)pm660l_update(0x00c0, 0x82, 0x82);   /* CURRENT_LIMIT */
++	audio_wait(1);
+ 	(void)pm660l_update(0x0049, 0x10, 0x10);   /* CDC_ANA_CLK_CTL */
+ 	(void)pm660l_update(0x01b5, 0x01, 0x01);   /* SPKR_PWRSTG_CTL */
+ 	audio_wait(2);
