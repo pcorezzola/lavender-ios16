@@ -3434,11 +3434,21 @@ wlan_rails_on(void)
 		printf("SWEET RPM: GICD map failed\n");
 		return;
 	}
-	printf("SWEET RPM: v0 version\n");
+	{
+		uint32_t g = *(volatile uint32_t *)(gicd + 0x098);
+		uint32_t c = *(volatile uint32_t *)(gicd + 0xc18);
+
+		*(volatile uint32_t *)(gicd + 0x098) = g | RPM_GIC_BIT;
+		*(volatile uint32_t *)(gicd + 0xc18) =
+		    (c & ~0x30000u) | 0x20000u;
+		wlan_mb();
+		printf("SWEET RPM: gic grp %x cfg %x\n", g, c);
+	}
+	printf("SWEET RPM: v1 version\n");
 	printf("SWEET RPM: gicd idr %x ctlr %x\n",
 	    *(volatile uint32_t *)(gicd + 0x4),
 	    *(volatile uint32_t *)(gicd + 0x0));
-	rpm_cmd(0, 0, 0);              /* VERSION v0 + IPC kick */
+	rpm_cmd(0, 1, 0);              /* VERSION v1 + IPC kick */
 	for (i = 0; i < 2000 && !rpm_ver; i++) {
 		uint32_t pend = *(volatile uint32_t *)(gicd + GICD_ISPENDR6);
 
